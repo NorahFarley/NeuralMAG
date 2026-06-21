@@ -1,0 +1,24 @@
+# Ignore the virtual environment folder
+NeuralMAG_env/
+
+# Ignore all generated dataset folders and raw numpy data
+Dataset/
+*.npy
+
+# VS Code configuration folders
+.vscode/
+
+# Jupyter Notebook checkpoints and cache files
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/
+
+# Python cache files (compiled bytecode)
+__pycache__/
+*.pyc
+
+# macOS system specific files (folder view configurations)
+.DS_Store
+
+# Local environment variables and secrets
+.env
+.env.local
