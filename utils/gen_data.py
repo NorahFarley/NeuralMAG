@@ -62,6 +62,9 @@ def simulate_spins(film, spin, Hext, args):
     return Spins_list, Hds_list, error_list
 
 def save_simulation_data(Spins_list, Hds_list, args, save_path, error_list, Hext):
+    # 1. Save Random Snapshots (Standard NeuralMAG) - replicate authors data
+    # 500 random frames for general training/testing
+    # Planned 20 random snapshots for specific testing groups
     random_indices = sorted(random.sample(range(1, len(Hds_list)-1), args.sav_samples))
     Spins_random_list = [Spins_list[i] for i in random_indices]
     Hds_random_list = [Hds_list[i] for i in random_indices]
@@ -71,6 +74,16 @@ def save_simulation_data(Spins_list, Hds_list, args, save_path, error_list, Hext
 
     np.save(os.path.join(save_path, 'Spins.npy'), np.stack(Spins_random_list, axis=0))
     np.save(os.path.join(save_path, 'Hds.npy'), np.stack(Hds_random_list, axis=0))
+
+    # 2. Save Final Converged State (Ground Truth Precision) - verify vortex precision
+    np.save(os.path.join(save_path, 'Spins_final.npy'), Spins_list[-1])
+    np.save(os.path.join(save_path, 'Hds_final.npy'), Hds_list[-1])
+
+    # 3. Save sequential data - last 100 consecutive frames ending w/ final converged (For SimVPv2)
+    Spins_seq = np.array(Spins_list[-100:]) 
+    Hds_seq = np.array(Hds_list[-100:])
+    np.save(os.path.join(save_path, 'Spins_seq100.npy'), Spins_seq)
+    np.save(os.path.join(save_path, 'Hds_seq100.npy'), Hds_seq)
 
     error_plot(error_list, os.path.join(save_path, 'iterns{:.1e}_errors_{:.1e}'.format(len(error_list), error_list[-1])),
                str('[{:.2f}, {:.2f}, {:.2f}]'.format(Hext[0], Hext[1], Hext[2])))
