@@ -31,7 +31,8 @@ from libs.Unet import UNet
 def load_unet_model(args):
     # load Unet Model
     model = UNet(kc=args.krn, inc=args.layers*3, ouc=args.layers*3).eval().to(device)
-    ckpt = '../ckpt/k{}/model.pt'.format(args.krn)
+    #ckpt = '../ckpt/k{}/model.pt'.format(args.krn)
+    ckpt = args.ckpt_path
     model.load_state_dict(torch.load(ckpt, map_location=device))
     MAG2305.load_model(model)
     print('Unet model loaded from {}'.format(ckpt))
@@ -40,7 +41,8 @@ def load_unet_model(args):
 def initialize_models(args):
     # Model shape and save model
     test_model = create_model(args.w, args.modelshape)
-    path0 = "./k{}/size{}/".format(args.krn, args.w)+"InitCore{}/".format(args.InitCore)
+    #path0 = "/content/drive/MyDrive/NeuralMAG_Data/NeuralMAG_Models/{}_folder/eval_results/k{}/size{}/InitCore{}/".format(args.model_name, args.krn, args.w, args.InitCore)    
+    path0 = f"{args.base_path}/{args.model_name}_folder/eval_results/k{args.krn}_size{args.w}_InitCore{args.InitCore}/"
     os.makedirs(path0, exist_ok=True)
     np.save(path0 + 'model', test_model[:,:,0])
 
@@ -79,7 +81,7 @@ def update_spin_state(film1, film2, Hext, args, test_model, path):
     rcd_windsum_unet = np.array([[],[]])
 
     # ==========================================
-    # INITIALIZING ERROR ARRAYS (ADDED)
+    # INITIALIZING ERROR ARRAYS 
     # ==========================================
     rcd_film2_drift = np.array([[],[]])
     rcd_film1_inst = np.array([[],[]])
@@ -117,7 +119,7 @@ def update_spin_state(film1, film2, Hext, args, test_model, path):
                 nplot = args.nplot
 
         # ==========================================================
-        # BASELINE ERROR TRACKING (ADDED)
+        # BASELINE ERROR TRACKING 
         # ==========================================================
         
         # 2. Film 2 Trajectory Drift (Spin Divergence) for reference -> Film 1 Trajectory Drift (Baseline = 0)
@@ -179,13 +181,15 @@ def update_spin_state(film1, film2, Hext, args, test_model, path):
             break
         
     # =============================================================================
-    # PRINT ERROR RESULTS AND SAVE ERROR DATA (ADDED)  
+    # PRINT ERROR RESULTS AND SAVE ERROR DATA 
     # ============================================================================= 
+    
     # Save tracked error data
-    np.save(path + 'error_film2_drift.npy', rcd_film2_drift)
-    np.save(path + 'error_film1_inst.npy',  rcd_film1_inst)
+    np.save(os.path.join(path, 'error_film2_drift.npy'), rcd_film2_drift)
+    np.save(os.path.join(path, 'error_film1_inst.npy'),  rcd_film1_inst)
 
     print("\n--- SIMULATION COMPLETE: ERROR SUMMARY ---")
+    print(f"Saved evaluation arrays directly to: {path}")
     print(f"Final Trajectory Drift (film2): {rcd_film2_drift[1, -1]:.5f}")
     print(f"Average Isolated Error (film1): {np.mean(rcd_film1_inst[1, :]):.5f}")
     print("------------------------------------------\n") 
@@ -221,6 +225,15 @@ if __name__ == '__main__':
     parser.add_argument('--nsave',      type=int,    default=10,        help='save number (default: 10)')
     parser.add_argument('--nplot',      type=int,    default=2000,      help='plot number (default: 1000)')
     parser.add_argument('--nsamples',   type=int,    default=100,       help='sample number (default: 1)')
+
+    # =============================================================================
+    # ARGUMENTS ADDED FOR MODEL SEPARATION
+    # =============================================================================
+    parser.add_argument('--ckpt_path',  type=str, required=True,        help='Absolute path to target model weights file')
+    parser.add_argument('--model_name', type=str, default='model_unamed', help='Folder namespace identifier for saved analysis metrics')
+    parser.add_argument('--base_path',  type=str, default='/content/drive/MyDrive/NeuralMAG_Data/NeuralMAG_Models', help='Root directory of the project')
+    # =============================================================================
+
     args = parser.parse_args()
     
     device = torch.device("cuda:{}".format(args.gpu))
