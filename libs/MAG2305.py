@@ -30,19 +30,37 @@ import numpy as np
 import sys
 
 
-# =============================================================================
-# Load Unet model
-# =============================================================================
+### =============================================================================
+### Load Unet model with Derivative Buffer
+### =============================================================================
+_spin_buffer = None  # Global variable to track m_{t-1}
+
 def load_model(m):
-    global _ckpt_model
+    global _ckpt_model, _spin_buffer
     _ckpt_model = m
+    _spin_buffer = None  # Reset buffer when a new model is loaded
 
 def MFNN(spin):
+    global _ckpt_model, _spin_buffer
     _ckpt_model.eval()
     with torch.no_grad():
+        # Align tensor dimensions for the UNet
         spin = spin.permute(2,3,0,1)
         spin = spin.view(1, -1, spin.size(2), spin.size(3))
-        return _ckpt_model(spin).permute(2,3,0,1).view(spin.size(2), spin.size(3), -1, 3)
+        
+        # Initialize the buffer on the very first timestep
+        if _spin_buffer is None:
+            _spin_buffer = spin.clone()
+            
+        # Concatenate past state (m_{t-1}) and current state (m_t) -> 12 channels
+        stacked_spin = torch.cat([_spin_buffer, spin], dim=1)
+        
+        # Update the memory buffer for the NEXT timestep
+        _spin_buffer = spin.clone()
+        
+        # Pass the 12-channel tensor into the model and return the 6-channel output
+        pred_Hd = _ckpt_model(stacked_spin)
+        return pred_Hd.permute(2,3,0,1).view(spin.size(2), spin.size(3), -1, 3)
 
 
 # =============================================================================
