@@ -52,32 +52,22 @@ def combinfilter(x_paths, y_paths, cn):
     np.random.seed(123)
     selected_x = []
     selected_y = []
-    a=0
-    for x_path, y_path in zip(x_paths, y_paths):
-        x_array = np.load(x_path).transpose((0, 3, 1, 2))
-        y_array = np.load(y_path).transpose((0, 3, 1, 2))
-        
-        # randomly select half of the data
-        indices = np.random.choice(x_array.shape[0], 500, replace=False)
-        x_array = x_array[indices]
-        y_array = y_array[indices]
-        
-        if cn <1000:
-            _, winding_abs = winding_density(x_array)
-            indices = np.where((0 <= winding_abs) & (winding_abs <= cn))
-            selected_x.append(x_array[indices])
-            selected_y.append(y_array[indices])
-        else:
-            selected_x.append(x_array)
-            selected_y.append(y_array)
-        a += x_array.shape[0]
-    selected_x = np.concatenate(selected_x, axis=0)
-    selected_y = np.concatenate(selected_y, axis=0)
-
-    print('0<= core number <={}, selected_percent: {:.2f}'.format(cn, selected_x.shape[0]/a))
-    print('selected x y shape: ', selected_x.shape, selected_y.shape, '\n')
     
-    return selected_x, selected_y
+    for x_path, y_path in zip(x_paths, y_paths):
+        # Load the consecutive trajectories
+        # Expected shape: (Frames, 6, 32, 32)
+        x_array = np.load(x_path)
+        y_array = np.load(y_path)
+        
+        # Iterate starting from index 1 so we always have a past state (i-1)
+        for i in range(1, x_array.shape):
+            # Stack m_{t-1} and m_t to create a 12-channel input
+            stacked_x = np.concatenate((x_array[i-1], x_array[i]), axis=0) 
+            
+            selected_x.append(stacked_x)
+            selected_y.append(y_array[i]) # Target is H_demag at current time t
+            
+    return np.array(selected_x), np.array(selected_y)
 
 
 def getdata(paths, ntest, n128, ntrain, cn, spin_file, hd_file, mode=None):

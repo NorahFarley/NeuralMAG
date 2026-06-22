@@ -31,7 +31,7 @@ from libs.Unet import UNet
 def load_unet_model(args):
     # load Unet Model
     model = UNet(kc=args.krn, inc=args.layers*3, ouc=args.layers*3).eval().to(device)
-    ckpt = '../ckpt/k{}/model.pt'.format(args.krn)
+    ckpt = args.ckpt_path
     model.load_state_dict(torch.load(ckpt, map_location=device))
     MAG2305.load_model(model)
     print('Unet model loaded from {}'.format(ckpt))
@@ -221,6 +221,12 @@ if __name__ == '__main__':
     parser.add_argument('--nsave',      type=int,    default=10,        help='save number (default: 10)')
     parser.add_argument('--nplot',      type=int,    default=2000,      help='plot number (default: 1000)')
     parser.add_argument('--nsamples',   type=int,    default=100,       help='sample number (default: 1)')
+
+    parser.add_argument('--ckpt_path', type=str, required=True, help='Absolute path to the trained model.pt')
+    parser.add_argument('--w', type=int, default=64, help='Grid size')
+    parser.add_argument('--layers', type=int, default=2, help='Number of layers')
+    parser.add_argument('--InitCore', type=int, default=5, help='Vortex cooling target')
+
     args = parser.parse_args()
     
     device = torch.device("cuda:{}".format(args.gpu))
