@@ -77,6 +77,14 @@ def update_spin_state(film1, film2, Hext, args, test_model, path):
     rcd_windabs_unet = np.array([[],[]])
     rcd_windsum_2305 = np.array([[],[]])
     rcd_windsum_unet = np.array([[],[]])
+
+    # ==========================================
+    # INITIALIZING ERROR ARRAYS (ADDED)
+    # ==========================================
+    rcd_film2_drift = np.array([[],[]])
+    rcd_film1_inst = np.array([[],[]])
+    # ==========================================
+
     fig, ax1, ax2, ax3, ax4, ax5, ax6 = plot_prepare()
     
     wind_abs = 10000
@@ -108,6 +116,32 @@ def update_spin_state(film1, film2, Hext, args, test_model, path):
             else:
                 nplot = args.nplot
 
+        # ==========================================================
+        # BASELINE ERROR TRACKING (ADDED)
+        # ==========================================================
+        
+        # 2. Film 2 Trajectory Drift (Spin Divergence) for reference -> Film 1 Trajectory Drift (Baseline = 0)
+        film2_drift = torch.sqrt(torch.mean((film1.Spin - film2.Spin)**2)).item()
+        
+        # 3. Film 1 Instantaneous Error (Isolated Architecture Error)
+        with torch.no_grad():
+            clean_spin_permuted = film1.Spin.permute(2, 3, 0, 1)
+            hd_pred_permuted = test_model(clean_spin_permuted)
+            hd_unet_isolated = hd_pred_permuted.permute(2, 3, 0, 1)
+            
+        film1_inst_error = torch.sqrt(torch.mean((film1.Hd - hd_unet_isolated)**2)).item()
+        
+        # 4. Film 2 Total Field Divergence 
+        film2_inst_error = torch.sqrt(torch.mean((film1.Hd - film2.Hd)**2)).item()
+        
+        # Append to recording arrays
+        rcd_film2_drift = np.append(rcd_film2_drift, [[iters], [film2_drift]], axis=1)
+        rcd_film1_inst  = np.append(rcd_film1_inst,  [[iters], [film1_inst_error]], axis=1)
+
+        # Print a live update every 200 steps
+        if iters % 200 == 0:
+            print(f"Step {iters:05d} | Traj Drift: {film2_drift:.5f} | Isol. Error: {film1_inst_error:.5f}")
+        # ==========================================================
             
         if iters % args.nsave ==0 or max(error_2305,error_unet)<=args.error_min:
             rcd_dspin_2305 = np.append(rcd_dspin_2305, [[iters], [error_2305]], axis=1)
@@ -143,12 +177,24 @@ def update_spin_state(film1, film2, Hext, args, test_model, path):
             spin_end_unet = np.array(film2.Spin[:,:,0].cpu())
             plot_close()
             break
+        
+    # =============================================================================
+    # PRINT ERROR RESULTS AND SAVE ERROR DATA (ADDED)  
+    # ============================================================================= 
+    # Save tracked error data
+    np.save(path + 'error_film2_drift.npy', rcd_film2_drift)
+    np.save(path + 'error_film1_inst.npy',  rcd_film1_inst)
+
+    print("\n--- SIMULATION COMPLETE: ERROR SUMMARY ---")
+    print(f"Final Trajectory Drift (film2): {rcd_film2_drift[1, -1]:.5f}")
+    print(f"Average Isolated Error (film1): {np.mean(rcd_film1_inst[1, :]):.5f}")
+    print("------------------------------------------\n") 
+    # =============================================================================   
 
     return (rcd_dspin_2305, rcd_dspin_unet_, 
             rcd_windabs_2305, rcd_windabs_unet, 
             rcd_windsum_2305, rcd_windsum_unet, 
             spin_ini, spin_end_2305, spin_end_unet)
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Unet speed test method: LLG_RK4')
