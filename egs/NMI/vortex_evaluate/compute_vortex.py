@@ -44,7 +44,9 @@ def initialize_models(args):
     #path0 = "/content/drive/MyDrive/NeuralMAG_Data/NeuralMAG_Models/{}_folder/eval_results/k{}/size{}/InitCore{}/".format(args.model_name, args.krn, args.w, args.InitCore)    
     path0 = f"{args.base_path}/{args.model_name}_folder/eval_results/k{args.krn}_size{args.w}_InitCore{args.InitCore}/"
     os.makedirs(path0, exist_ok=True)
-    np.save(path0 + 'model', test_model[:,:,0])
+    #np.save(path0 + 'model', test_model[:,:,0])
+    mask_geometry = test_model[:,:,0] if hasattr(test_model, 'shape') else test_model
+    np.save(path0 + 'model', mask_geometry)
 
     #Initialize MAG2305 models.
     film1 = MAG2305.mmModel(types='bulk', size=(args.w, args.w, args.layers), cell=(3,3,3), 
@@ -236,10 +238,26 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     
-    device = torch.device("cuda:{}".format(args.gpu))
+    #device = torch.device("cuda:{}".format(args.gpu))
+
+    # This automatically detects what your computer supports!
+    if torch.cuda.is_available():
+        device = torch.device(f"cuda:{args.gpu}")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
+
+    print(f"Using execution device: {device}")
 
     # create two film models
     film1, film2, test_model, path0 = initialize_models(args)
+   
+
+    
+    print(f"DEBUG: type(film1)      = {type(film1)}")
+    print(f"DEBUG: type(film2)      = {type(film2)}")
+    print(f"DEBUG: type(test_model) = {type(test_model)}")
 
     # Random seed list
     seeds_list = list(range(10000, 110000, 100))[:args.nsamples]
