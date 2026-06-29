@@ -234,6 +234,10 @@ if __name__ == '__main__':
     spin_mm = np.array([[[[1]]]])
     spin_un = np.array([[[[1]]]])
 
+    # Error Tracking Lists
+    instantaneous_hd_mae = []   # Local network prediction discrepancy at equilibrium
+    trajectory_shift_mae = []   # Accumulated configuration divergence over historical path
+
     # Main loop
     for nloop, Hext_val in enumerate(Hext_range):
         Hext = Hext_val * Hext_vec
@@ -251,6 +255,13 @@ if __name__ == '__main__':
         spin_un = film2.Spin.detach().cpu().numpy()
         Hd_mm = film1.Hd.detach().cpu().numpy()
         Hd_un = film2.Hd.detach().cpu().numpy()
+
+        # Calculate and append tracking errors
+        hd_error = np.mean(np.abs(Hd_un - Hd_mm))
+        spin_error = np.mean(np.abs(spin_un - spin_mm))
+
+        instantaneous_hd_mae.append(hd_error)
+        trajectory_shift_mae.append(spin_error)
         
         #MH loop data
         x_plot.append(Hext_val)
@@ -264,6 +275,10 @@ if __name__ == '__main__':
         np.save(filename + "Hext_array", x_plot)
         np.save(filename + "Mext_array_mm", y1_plot)
         np.save(filename + "Mext_array_un", y2_plot)
+
+        # Save tracking errors dynamically
+        np.save(filename + "instantaneous_hd_mae", instantaneous_hd_mae)
+        np.save(filename + "trajectory_shift_mae", trajectory_shift_mae)
 
         # Save Mr
         if Hext_val == 0:
@@ -282,3 +297,33 @@ if __name__ == '__main__':
         if Mi > 0 and Mj <= 0:
             np.save(filename + "Hc{}_spin_un".format(nloop-1), spin0_un)
             np.save(filename + "Hc{}_spin_un".format(nloop), spin_un)
+
+    # ---------------------------------------------------------
+    # Generate Final Comprehensive Error Accumulation Plot
+    # ---------------------------------------------------------
+    print("Generating comprehensive error tracking analysis...")
+    fig_err, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+    fig_err.suptitle('NeuralMAG Temporal Drift & Prediction Error Analysis\nSize: {}x{}, Layers: {}'.format(args.w, args.w, args.layers), fontsize=14, fontweight='bold')
+
+    # Subplot 1: Instantaneous Field Error
+    ax1.plot(Hext_range, instantaneous_hd_mae, color='darkorange', lw=2, linestyle='-', label='Demag Field Prediction Error')
+    ax1.set_ylabel('Instantaneous $H_{demag}$ MAE [Oe]', fontsize=12)
+    ax1.title.set_text('Local Model Approximation Discrepancy')
+    ax1.grid(True, linestyle='--', alpha=0.6)
+    ax1.legend(loc='upper right')
+
+    # Subplot 2: Cumulative Trajectory Shift
+    ax2.plot(Hext_range, trajectory_shift_mae, color='crimson', lw=2, linestyle='-', label='Magnetization Trajectory Drift')
+    ax2.set_xlabel('External Magnetic Field $H_{ext}$ [Oe]', fontsize=12)
+    ax2.set_ylabel('Cumulative Spin $\\vec{m}$ MAE', fontsize=12)
+    ax2.title.set_text('Historical Path Divergence (Accumulated Error)')
+    ax2.grid(True, linestyle='--', alpha=0.6)
+    ax2.legend(loc='upper right')
+
+    # Reverse x-axis to match the physical sweeping sequence from +1000 Oe to -1000 Oe
+    ax2.set_xlim(max(Hext_range), min(Hext_range))
+
+    plt.tight_layout()
+    plt.savefig(filename + 'comprehensive_error_analysis.png', dpi=300)
+    plt.close()
+    print(f"Error metrics saved successfully to directory: {filename}")
