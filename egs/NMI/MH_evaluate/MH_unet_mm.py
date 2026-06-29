@@ -214,14 +214,23 @@ if __name__ == '__main__':
 
     # initialize spin state
     spin_split, rand_seed, cell_count = prepare_spin_state(film1, film2, args)
-    
-    # create folder
-    filename='./figs_k{}/shape_{}/size{}_Ms{}_Ax{}_Ku{}_dtime{}_split{}_seed{}_Layers{}/'.format(
+
+    # Change the local save directory to Google Drive folder
+    filename = '/content/drive/MyDrive/NeuralMAG_Data/figs_k{}/shape_{}/size{}_Ms{}_Ax{}_Ku{}_dtime{}_split{}_seed{}_Layers{}/'.format(
                     args.krn, args.mask, args.w, 
                     args.Ms, args.Ax, args.Ku, 
                     args.dtime, spin_split, rand_seed, args.layers
                     )
     os.makedirs(os.path.dirname(filename), exist_ok=True)
+    
+    
+    # # create folder
+    # filename='./figs_k{}/shape_{}/size{}_Ms{}_Ax{}_Ku{}_dtime{}_split{}_seed{}_Layers{}/'.format(
+    #                 args.krn, args.mask, args.w, 
+    #                 args.Ms, args.Ax, args.Ku, 
+    #                 args.dtime, spin_split, rand_seed, args.layers
+    #                 )
+    # os.makedirs(os.path.dirname(filename), exist_ok=True)
     
     
     # get MH data

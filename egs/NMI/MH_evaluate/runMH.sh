@@ -5,7 +5,7 @@ export PYTHONPATH=$(dirname $(dirname $(dirname $(pwd)))):$PYTHONPATH
 
 gpu=0
 
-for width in 64 96
+for width in 64 
 do
     for mask in True triangle hole
     do
@@ -30,7 +30,7 @@ do
 done
 
 
-for width in 128 256
+for width in 128 
 do
 
     for Ms in 1200 1000 800 600 400
