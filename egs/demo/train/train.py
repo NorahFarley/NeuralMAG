@@ -280,7 +280,7 @@ if __name__ == '__main__':
     parser.add_argument('--ex',         type=float, default=1.0,    help='experiment (default: 0)')
     parser.add_argument('--dataug',     type=bool,  default=True,   help='data augmentation (default: False)')
     parser.add_argument('--alpha',      type=float, default=0.5,    help='weighting coefficient for topology-aware loss')
-    parser.add_argument('--loss_type',  typer=str,  default='baseline', help='loss weighting method')
+    parser.add_argument('--loss_type',  type=str,  default='baseline', help='loss weighting method')
     args = parser.parse_args()
 
     #working env
