@@ -50,25 +50,25 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
         if args.loss_type == "baseline":
             weight1 = 1
             weight2 = 1
-            weight3 = 1
+            weight3 = 1   
+            
+        elif args.loss_type == "divergence":
+            wd1 = magnetic_divergence(x1)
+            wd2 = magnetic_divergence(x2)
+            wd3 = magnetic_divergence(x3)
 
+        elif args.loss_type == "gradient":
+            wd1 = gradient_magnitude(x1)
+            wd2 = gradient_magnitude(x2)
+            wd3 = gradient_magnitude(x3)
+        
         elif args.loss_type == "winding":
             wd1, _ = winding_density(x1)
             wd2, _ = winding_density(x2)
-            wd3, _ = winding_density(x3)    
-            
-        elif args.loss_type == "magnetic_charge_density":
-            wd1 = magnetic_charge_density(x1)
-            wd2 = magnetic_charge_density(x2)
-            wd3 = magnetic_charge_density(x3)
+            wd3, _ = winding_density(x3)   
 
-        # elif args.loss_type == "divergence":
-        #     div1 = magnetic_divergence(x1)
-        #     weight1 = 1 + args.alpha * torch.abs(div1)
-
-        # elif args.loss_type == "gradient":
-        #     grad1 = gradient_magnitude(x1)
-        #     weight1 = 1 + args.alpha * grad1    
+        else:
+            raise ValueError(f"Unknown loss_type: {args.loss_type}")
 
         wd1 = wd1.unsqueeze(1)
         wd2 = wd2.unsqueeze(1)
@@ -99,13 +99,22 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
             wd_abs_96 = torch.abs(wd3)
 
             print("max 32:", wd_abs_32.max().item())
+            print("min 32:", wd_abs_32.min().item())
             print("abs mean 32:", wd_abs_32.mean().item())
             print("abs std 32:", wd_abs_32.std().item())
             print("99th percentile 32:", torch.quantile(wd_abs_32.flatten(), 0.99).item())
+
+            print("max 64:", wd_abs_64.max().item())
+            print("min 64:", wd_abs_64.min().item())
             print("abs mean 64:", wd_abs_64.mean().item())
             print("abs std 64:", wd_abs_64.std().item())
+            print("99th percentile 64:", torch.quantile(wd_abs_64.flatten(), 0.99).item())
+
+            print("max 96:", wd_abs_96.max().item())
+            print("min 96:", wd_abs_96.min().item())
             print("abs mean 96:", wd_abs_96.mean().item())
             print("abs std 96:", wd_abs_96.std().item())
+            print("99th percentile 96:", torch.quantile(wd_abs_96.flatten(), 0.99).item())
 
             wd_stats = {
                 "32": {
@@ -145,10 +154,12 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
                 json.dump(wd_stats, f, indent=4)
 
 
+        if args.loss_type != "baseline":
+            weight1 = 1 + alpha * torch.abs(wd1)
+            weight2 = 1 + alpha * torch.abs(wd2)
+            weight3 = 1 + alpha * torch.abs(wd3)
 
-        weight1 = 1 + alpha * torch.abs(wd1)
-        weight2 = 1 + alpha * torch.abs(wd2)
-        weight3 = 1 + alpha * torch.abs(wd3)
+       # weight1 = 1 + alpha * wd1 + beta * wd1_2 #winding/gradient
 
         #data1 size32
         pred_y1 = model(x1)

@@ -130,6 +130,15 @@ def winding_density(spin_batch):
     return winding_density, torch.round(winding_abs).cpu().numpy()
 
 def magnetic_charge_density(spin_batch):
+    """
+    Computes magnetic charge density for a batch of magnetization fields
+
+    Args:
+        spin_batch: Tensor of shape (batch, 3, H, W)
+
+    Returns:
+        div_mag: Tensor of shape (batch, H, W)
+    """
 
     spin = spin_batch
 
@@ -148,7 +157,44 @@ def magnetic_charge_density(spin_batch):
 
     return charge
 
+def gradient_magnitude(spin_batch):
+    """
+    Computes magnitude of spatial magnetization gradient
 
+    Args:
+        spin_batch: Tensor of shape (batch, 3, H, W)
+
+    Returns:
+        grad_mag: Tensor of shape (batch, H, W)
+    """
+
+    grad_sq = 0.0
+
+    for c in range(3):
+
+        M = spin_batch[:, c]
+
+        M_xp = torch.roll(M, shifts=-1, dims=1)
+        M_xm = torch.roll(M, shifts=1, dims=1)
+
+        M_yp = torch.roll(M, shifts=-1, dims=2)
+        M_ym = torch.roll(M, shifts=1, dims=2)
+
+        # replicate edge values
+        M_xp[:, -1, :] = M[:, -1, :]
+        M_xm[:,  0, :] = M[:,  0, :]
+
+        M_yp[:, :, -1] = M[:, :, -1]
+        M_ym[:, :,  0] = M[:, :,  0]
+
+        dMx = (M_xp - M_xm) / 2
+        dMy = (M_yp - M_ym) / 2
+
+        grad_sq += dMx**2 + dMy**2
+
+    grad_mag = torch.sqrt(grad_sq)
+
+    return grad_mag
 
 def tensor_rotate(tensor, symtype=None):
     #spins(bsz,w,h,channel)
