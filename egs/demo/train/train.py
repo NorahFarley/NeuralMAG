@@ -4,6 +4,10 @@ from tqdm import tqdm
 from matplotlib import pyplot as plt
 import logging
 
+import json
+import time
+from datetime import datetime
+
 import torch
 import torch.optim as optimizer
 
@@ -40,23 +44,128 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
             x3, y3 = dataug(x3,y3)
 
         mask1, mask2, mask3 = create_mask(x1), create_mask(x2), create_mask(x3)
+        
+        alpha = args.alpha
+
+        if args.loss_type == "baseline":
+            weight1 = 1
+            weight2 = 1
+            weight3 = 1
+
+        elif args.loss_type == "winding":
+            wd1, _ = winding_density(x1)
+            wd2, _ = winding_density(x2)
+            wd3, _ = winding_density(x3)    
+            
+        elif args.loss_type == "magnetic_charge_density":
+            wd1 = magnetic_charge_density(x1)
+            wd2 = magnetic_charge_density(x2)
+            wd3 = magnetic_charge_density(x3)
+
+        # elif args.loss_type == "divergence":
+        #     div1 = magnetic_divergence(x1)
+        #     weight1 = 1 + args.alpha * torch.abs(div1)
+
+        # elif args.loss_type == "gradient":
+        #     grad1 = gradient_magnitude(x1)
+        #     weight1 = 1 + args.alpha * grad1    
+
+    
+        if epoch == 0 and batch_idx == 0:
+            print("\n========== Weight Statistics ==========")
+            print("32x32")
+            print("min:", wd1.min().item())
+            print("max:", wd1.max().item())
+            print("mean:", wd1.mean().item())
+            print("std:", wd1.std().item())
+
+            print("64x64")
+            print("min:", wd2.min().item())
+            print("max:", wd2.max().item())
+            print("mean:", wd2.mean().item())
+            print("std:", wd2.std().item())
+
+            print("96x96")
+            print("min:", wd3.min().item())
+            print("max:", wd3.max().item())
+            print("mean:", wd3.mean().item())
+            print("std:", wd3.std().item())
+
+            wd_abs_32 = torch.abs(wd1)
+            wd_abs_64 = torch.abs(wd2)
+            wd_abs_96 = torch.abs(wd3)
+
+            print("max 32:", wd_abs_32.max().item())
+            print("abs mean 32:", wd_abs_32.mean().item())
+            print("abs std 32:", wd_abs_32.std().item())
+            print("99th percentile 32:", torch.quantile(wd_abs_32.flatten(), 0.99).item())
+            print("abs mean 64:", wd_abs_64.mean().item())
+            print("abs std 64:", wd_abs_64.std().item())
+            print("abs mean 96:", wd_abs_96.mean().item())
+            print("abs std 96:", wd_abs_96.std().item())
+
+            wd_stats = {
+                "32": {
+                    "min": wd1.min().item(),
+                    "max": wd1.max().item(),
+                    "mean": wd1.mean().item(),
+                    "std": wd1.std().item(),
+                    "abs_mean": torch.abs(wd1).mean().item(),
+                    "abs_max": torch.abs(wd1).max().item(),
+                    "p99": torch.quantile(torch.abs(wd1).flatten(),0.99).item()
+                },
+
+                "64": {
+                    "min": wd2.min().item(),
+                    "max": wd2.max().item(),
+                    "mean": wd2.mean().item(),
+                    "std": wd2.std().item(),
+                    "abs_mean": torch.abs(wd2).mean().item(),
+                    "abs_max": torch.abs(wd2).max().item(),
+                    "p99": torch.quantile(torch.abs(wd2).flatten(),0.99).item()
+                },
+
+                "96": {
+                    "min": wd3.min().item(),
+                    "max": wd3.max().item(),
+                    "mean": wd3.mean().item(),
+                    "std": wd3.std().item(),
+                    "abs_mean": torch.abs(wd3).mean().item(),
+                    "abs_max": torch.abs(wd3).max().item(),
+                    "p99": torch.quantile(torch.abs(wd3).flatten(),0.99).item()
+                }
+            }
+
+            file_path = os.path.join(ex_path, f"{args.loss_type}_stats.json")
+
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(wd_stats, f, indent=4)
+
+
+        wd1 = wd1.unsqueeze(1)
+        wd2 = wd2.unsqueeze(1)
+        wd3 = wd3.unsqueeze(1)
+
+        weight1 = 1 + alpha * torch.abs(wd1)
+        weight2 = 1 + alpha * torch.abs(wd2)
+        weight3 = 1 + alpha * torch.abs(wd3)
 
         #data1 size32
         pred_y1 = model(x1)
-        loss11 = mse( ISLA(pred_y1), y1 )*mask1 #enlarge-scale predict Hd to label Hd 
-        loss12 = mse( pred_y1, SLA(y1) )*mask1  #shrink-scale label Hd to predict Hd
+        loss11 = mse( ISLA(pred_y1), y1 )*mask1 * weight1 #enlarge-scale predict Hd to label Hd 
+        loss12 = mse( pred_y1, SLA(y1) )*mask1  * weight1 #shrink-scale label Hd to predict Hd
         loss1 = ( (loss11 + 1000*loss12) ).mean()
 
         #data2 size64
         pred_y2 = model(x2)
-        loss21 = mse(ISLA(pred_y2), y2)*mask2
-        loss22 = mse(pred_y2, SLA(y2))*mask2
+        loss21 = mse(ISLA(pred_y2), y2)*mask2 * weight2
+        loss22 = mse(pred_y2, SLA(y2))*mask2 * weight2
         loss2 = ( (loss21 + 1000*loss22) ).mean()
         
         #data3 size96
         pred_y3 = model(x3)
-        loss31 = mse(ISLA(pred_y3), y3)*mask3
-        loss32 = mse(pred_y3, SLA(y3))*mask3
+        loss31 = mse(ISLA(pred_y3), y3)*mask3 * weight3
+        loss32 = mse(pred_y3, SLA(y3))*mask3 * weight3
         loss3 = ( (loss31 + 1000*loss32) ).mean()
 
         loss = loss1 + loss2 + loss3
@@ -170,6 +279,8 @@ if __name__ == '__main__':
     parser.add_argument('--gpu',        type=int,   default=0,      help='GPU used (default: 0)')
     parser.add_argument('--ex',         type=float, default=1.0,    help='experiment (default: 0)')
     parser.add_argument('--dataug',     type=bool,  default=True,   help='data augmentation (default: False)')
+    parser.add_argument('--alpha',      type=float, default=0.5,    help='weighting coefficient for topology-aware loss')
+    parser.add_argument('--loss_type',  typer=str,  default='baseline', help='loss weighting method')
     args = parser.parse_args()
 
     #working env
@@ -182,21 +293,37 @@ if __name__ == '__main__':
     model = UNet(kc=args.kc, inc=args.inch, ouc=args.inch).to(device)
     optim = optimizer.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=0.0001)
 
-    #load data
-    data_path11 = '../../../utils/Dataset/data_Hd32_Hext1000_mask'
-    data_path12 = '../../../utils/Dataset/data_Hd32_Hext100_mask'
-    data_path13 = '../../../utils/Dataset/data_Hd32_Hext0'
+    # #load data
+    # data_path11 = '../../../utils/Dataset/data_Hd32_Hext1000_mask'
+    # data_path12 = '../../../utils/Dataset/data_Hd32_Hext100_mask'
+    # data_path13 = '../../../utils/Dataset/data_Hd32_Hext0'
 
-    data_path21 = '../../../utils/Dataset/data_Hd64_Hext1000_mask'
-    data_path22 = '../../../utils/Dataset/data_Hd64_Hext100_mask'
-    data_path23 = '../../../utils/Dataset/data_Hd64_Hext0'
+    data_path11 = '../../../utils/Dataset/data_Hd32_mask'
+    data_path12 = '../../../utils/Dataset/data_Hd32_mask2'
+    data_path13 = '../../../utils/Dataset/data_Hd32_no_mask'
 
-    data_path31 = '../../../utils/Dataset/data_Hd96_Hext1000_mask'
-    data_path32 = '../../../utils/Dataset/data_Hd96_Hext100_mask'
-    data_path33 = '../../../utils/Dataset/data_Hd96_Hext0'
+    # data_path21 = '../../../utils/Dataset/data_Hd64_Hext1000_mask'
+    # data_path22 = '../../../utils/Dataset/data_Hd64_Hext100_mask'
+    # data_path23 = '../../../utils/Dataset/data_Hd64_Hext0'
 
-    data_path41 = '../../../utils/Dataset/data_Hd128_Hext1000_mask'
-    data_path42 = '../../../utils/Dataset/data_Hd128_Hext100_mask'
+    data_path21 = '../../../utils/Dataset/data_Hd64_mask'
+    data_path22 = '../../../utils/Dataset/data_Hd64_mask2'
+    data_path23 = '../../../utils/Dataset/data_Hd64_no_mask'
+
+    # data_path31 = '../../../utils/Dataset/data_Hd96_Hext1000_mask'
+    # data_path32 = '../../../utils/Dataset/data_Hd96_Hext100_mask'
+    # data_path33 = '../../../utils/Dataset/data_Hd96_Hext0'
+
+    data_path31 = '../../../utils/Dataset/data_Hd96_mask'
+    data_path32 = '../../../utils/Dataset/data_Hd96_mask2'
+    data_path33 = '../../../utils/Dataset/data_Hd96_no_mask'
+
+    # data_path41 = '../../../utils/Dataset/data_Hd128_Hext1000_mask'
+    # data_path42 = '../../../utils/Dataset/data_Hd128_Hext100_mask'
+    # data_path43 = '../../../utils/Dataset/data_Hd128_Hext0'
+
+    data_path41 = '../../../utils/Dataset/data_Hd128_Hext0'
+    data_path42 = '../../../utils/Dataset/data_Hd128_Hext0'
     data_path43 = '../../../utils/Dataset/data_Hd128_Hext0'
     
     data_path1 = [data_path11, data_path12, data_path13]
@@ -226,15 +353,31 @@ if __name__ == '__main__':
     test_dataloader3  = torch.utils.data.DataLoader(dataset=test_dataset3,  batch_size=500, shuffle=True,  num_workers=8, drop_last=False)
     test_dataloader4  = torch.utils.data.DataLoader(dataset=test_dataset4,  batch_size=500, shuffle=True,  num_workers=8, drop_last=False)
 
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
     #experiment path
-    ex_path='./ex{}_bsz{}_Ir{}_Unet_kc{}_inch{}'.format(
-            args.ex, bsz1, args.lr, args.kc, args.inch
-            )
+    ex_path = (
+    f"./{args.loss_type}_loss/"
+    f"{timestamp}_ex{args.ex}_alpha{args.alpha}"
+    f"_bsz{bsz1}_lr{args.lr}_Unet_kc{args.kc}_inch{args.inch}"
+    )
     os.makedirs(ex_path, exist_ok=True)
 
     # Set up logging
     logging.basicConfig(filename=ex_path + '/training.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+    num_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(
+        p.numel()
+        for p in model.parameters()
+        if p.requires_grad
+    )
+
+    logging.info(f"Total parameters: {num_params:,}")
+    logging.info(f"Trainable parameters: {trainable_params:,}")
+
+    logging.info(f"GPU: {torch.cuda.get_device_name(device)}")
+    logging.info(f"PyTorch: {torch.__version__}")
 
     loss_train_list = []
     loss_test_list1 = []
@@ -243,6 +386,9 @@ if __name__ == '__main__':
     loss_test_list4 = []
     epoch_list = []
     best_loss = float('inf')
+
+    start_time = time.time()
+
     for epoch in range(args.epochs): 
         #train
         loss_train = train(epoch, model, optim,  train_dataloader1, train_dataloader2, train_dataloader3)
@@ -271,6 +417,7 @@ if __name__ == '__main__':
         if loss_test < best_loss:
             print('loss_test: {:.1f} < best_loss: {:.1f} \n'.format(loss_test, best_loss))
             best_loss = loss_test
+            best_epoch = epoch
             best_model_state_dict = model.state_dict()
             torch.save(best_model_state_dict, f"{model_path}/best_model_{best_loss:.1f}.pt")
 
@@ -287,3 +434,34 @@ if __name__ == '__main__':
         plt.ylabel('loss-log')
         plt.yscale('log')  # set y-axis scale to logarithmic
         plt.savefig(ex_path + '/loss_ex{}.png'.format(args.ex))
+
+    elapsed = time.time() - start_time
+
+    experiment_info = {
+        "alpha": args.alpha,
+        "learning_rate": args.lr,
+        "batch_size_32": bsz1,
+        "batch_size_64": bsz2,
+        "batch_size_96": bsz3,
+        "epochs": args.epochs,
+        "kernel_channels": args.kc,
+        "input_channels": args.inch,
+        "optimizer": "Adam",
+        "betas": [0.9, 0.999],
+        "weight_decay": 1e-4,
+        "data_augmentation": args.dataug,
+        "seed": 0,
+        "best_epoch": best_epoch,
+        "best_validation_loss": best_loss,
+        "training_time_seconds": elapsed 
+    }
+
+    with open(ex_path + "/experiment.json", "w") as f:
+        json.dump(experiment_info, f, indent=4)  
+
+    logging.info(f"Best epoch: {best_epoch}")
+    logging.info(f"Best validation loss: {best_loss}")
+
+    logging.info(f"Training time: {elapsed:.2f} seconds")
+    logging.info(f"Training time: {elapsed/60:.2f} minutes")
+    logging.info(json.dump(experiment_info, f, indent=4))  

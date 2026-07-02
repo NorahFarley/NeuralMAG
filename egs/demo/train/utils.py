@@ -129,6 +129,25 @@ def winding_density(spin_batch):
 
     return winding_density, torch.round(winding_abs).cpu().numpy()
 
+def magnetic_charge_density(spin_batch):
+
+    spin = spin_batch
+
+    Mx = spin[:,0,:,:]
+    My = spin[:,1,:,:]
+
+    Mx_xp = torch.roll(Mx,-1,dims=1)
+    Mx_xm = torch.roll(Mx, 1,dims=1)
+    My_yp = torch.roll(My,-1,dims=2)
+    My_ym = torch.roll(My, 1,dims=2)
+
+    dMxdx = (Mx_xp - Mx_xm)/2
+    dMydy = (My_yp - My_ym)/2
+
+    charge = -(dMxdx + dMydy)
+
+    return charge
+
 
 
 def tensor_rotate(tensor, symtype=None):
