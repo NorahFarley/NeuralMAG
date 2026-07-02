@@ -344,14 +344,14 @@ if __name__ == '__main__':
     print('batch size 1 2 3: ',bsz1, bsz2, bsz3,'\n')
 
 
-    train_dataloader1 = torch.utils.data.DataLoader(dataset=train_dataset1, batch_size=bsz1, shuffle=True,  num_workers=8, drop_last=False)
-    train_dataloader2 = torch.utils.data.DataLoader(dataset=train_dataset2, batch_size=bsz2, shuffle=True,  num_workers=8, drop_last=False)
-    train_dataloader3 = torch.utils.data.DataLoader(dataset=train_dataset3, batch_size=bsz3, shuffle=True,  num_workers=8, drop_last=False)
+    train_dataloader1 = torch.utils.data.DataLoader(dataset=train_dataset1, batch_size=bsz1, shuffle=True,  num_workers=0, drop_last=False)
+    train_dataloader2 = torch.utils.data.DataLoader(dataset=train_dataset2, batch_size=bsz2, shuffle=True,  num_workers=0, drop_last=False)
+    train_dataloader3 = torch.utils.data.DataLoader(dataset=train_dataset3, batch_size=bsz3, shuffle=True,  num_workers=0, drop_last=False)
     
-    test_dataloader1  = torch.utils.data.DataLoader(dataset=test_dataset1,  batch_size=500, shuffle=True,  num_workers=8, drop_last=False)
-    test_dataloader2  = torch.utils.data.DataLoader(dataset=test_dataset2,  batch_size=500, shuffle=True,  num_workers=8, drop_last=False)
-    test_dataloader3  = torch.utils.data.DataLoader(dataset=test_dataset3,  batch_size=500, shuffle=True,  num_workers=8, drop_last=False)
-    test_dataloader4  = torch.utils.data.DataLoader(dataset=test_dataset4,  batch_size=500, shuffle=True,  num_workers=8, drop_last=False)
+    test_dataloader1  = torch.utils.data.DataLoader(dataset=test_dataset1,  batch_size=100, shuffle=True,  num_workers=0, drop_last=False) #changed batch size from 500 and num workers from 8 on all
+    test_dataloader2  = torch.utils.data.DataLoader(dataset=test_dataset2,  batch_size=100, shuffle=True,  num_workers=0, drop_last=False)
+    test_dataloader3  = torch.utils.data.DataLoader(dataset=test_dataset3,  batch_size=100, shuffle=True,  num_workers=0, drop_last=False)
+    test_dataloader4  = torch.utils.data.DataLoader(dataset=test_dataset4,  batch_size=100, shuffle=True,  num_workers=0, drop_last=False)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
