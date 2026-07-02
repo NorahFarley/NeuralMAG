@@ -3,7 +3,7 @@
 
 
 
-python ./train.py --batch-size 100 \
+python ./train.py --batch-size 50 \
                 --lr 0.005 \
                 --epochs 1000 \
                 --kc 16 \
