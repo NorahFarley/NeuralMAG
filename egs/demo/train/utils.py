@@ -132,7 +132,7 @@ def winding_density(spin_batch):
 
     return winding_density, torch.round(winding_abs).cpu().numpy()
 
-def magnetic_charge_density(spin_batch):
+def magnetic_divergence(spin_batch):
     """
     Computes magnetic charge density for a batch of magnetization fields
 

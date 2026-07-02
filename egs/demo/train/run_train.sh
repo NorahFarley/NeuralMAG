@@ -3,8 +3,8 @@
 
 
 
-python ./train.py --batch-size 100 \
-                --lr 0.005 \
+python ./train.py --batch-size 16 \
+                --lr 0.002 \
                 --epochs 1000 \
                 --kc 16 \
                 --inch 6 \
