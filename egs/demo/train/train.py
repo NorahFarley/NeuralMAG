@@ -67,6 +67,14 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
             wd2, _ = winding_density(x2)
             wd3, _ = winding_density(x3)   
 
+        elif args.loss_type == "exchange_energy": #exchange energy density
+            #Since all simulations use the same exchange stiffness, the constant 
+            # factor was absorbed into the weighting coefficient α.
+            wd1 = gradient_magnitude(x1)**2
+            wd2 = gradient_magnitude(x2)**2
+            wd3 = gradient_magnitude(x3)**2
+
+
         else:
             raise ValueError(f"Unknown loss_type: {args.loss_type}")
 
@@ -76,19 +84,19 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
     
         if epoch == 0 and batch_idx == 0:
             print("\n========== Weight Statistics ==========")
-            print("32x32")
+            print("32x32", flush=True)
             print("min:", wd1.min().item())
             print("max:", wd1.max().item())
             print("mean:", wd1.mean().item())
             print("std:", wd1.std().item())
 
-            print("64x64")
+            print("64x64", flush=True)
             print("min:", wd2.min().item())
             print("max:", wd2.max().item())
             print("mean:", wd2.mean().item())
             print("std:", wd2.std().item())
 
-            print("96x96")
+            print("96x96", flush=True)
             print("min:", wd3.min().item())
             print("max:", wd3.max().item())
             print("mean:", wd3.mean().item())
@@ -275,6 +283,8 @@ def eval(epoch, model, dataloader1, dataloader2, dataloader3, dataloader4):
 
 
 if __name__ == '__main__':
+    print("Reached main()", flush=True)
+
     # Training settings
     parser = argparse.ArgumentParser(description='Unet micromagnetics')
     parser.add_argument('--batch-size', type=int,   default=100,    help='input batch size for training (default: 16)')
@@ -294,14 +304,19 @@ if __name__ == '__main__':
     parser.add_argument('--loss_type',  type=str,  default='baseline', help='loss weighting method')
     args = parser.parse_args()
 
+    print("Parsed arguments", flush=True)
+
     # #working env
     # device = torch.device("cuda:{}".format(args.gpu))
     # torch.manual_seed(0)
     # torch.cuda.manual_seed(0) 
     # torch.backends.cudnn.benchmark = True
 
+
+
     if torch.cuda.is_available():
         device = torch.device(f"cuda:{args.gpu}")
+        print(device, flush=True)
         torch.backends.cudnn.benchmark = True
     elif torch.backends.mps.is_available():
         device = torch.device("mps")
@@ -314,6 +329,7 @@ if __name__ == '__main__':
     elif device.type == "mps":
         torch.mps.manual_seed(0)    
     
+
     # Model, optimizer, and data loaders initialization
     model = UNet(kc=args.kc, inc=args.inch, ouc=args.inch).to(device)
     optim = optimizer.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=0.0001)
@@ -355,6 +371,8 @@ if __name__ == '__main__':
     data_path2 = [data_path21, data_path22, data_path23]
     data_path3 = [data_path31, data_path32, data_path33]
     data_path4 = [data_path41, data_path42, data_path43]
+
+    print("Creating datasets", flush=True)
 
     train_dataset1, test_dataset1 = dataset_prepare(data_path1, ntest=args.ntest, n128=args.ntest, ntrain=args.ntrain, cn=args.cornum)
     train_dataset2, test_dataset2 = dataset_prepare(data_path2, ntest=args.ntest, n128=args.ntest, ntrain=args.ntrain, cn=args.cornum)
@@ -413,6 +431,8 @@ if __name__ == '__main__':
     best_loss = float('inf')
 
     start_time = time.time()
+
+    print("Creating model", flush=True)
 
     for epoch in range(args.epochs): 
         #train
