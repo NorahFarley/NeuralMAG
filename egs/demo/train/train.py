@@ -70,6 +70,9 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
         #     grad1 = gradient_magnitude(x1)
         #     weight1 = 1 + args.alpha * grad1    
 
+        wd1 = wd1.unsqueeze(1)
+        wd2 = wd2.unsqueeze(1)
+        wd3 = wd3.unsqueeze(1)
     
         if epoch == 0 and batch_idx == 0:
             print("\n========== Weight Statistics ==========")
@@ -142,9 +145,6 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
                 json.dump(wd_stats, f, indent=4)
 
 
-        wd1 = wd1.unsqueeze(1)
-        wd2 = wd2.unsqueeze(1)
-        wd3 = wd3.unsqueeze(1)
 
         weight1 = 1 + alpha * torch.abs(wd1)
         weight2 = 1 + alpha * torch.abs(wd2)
