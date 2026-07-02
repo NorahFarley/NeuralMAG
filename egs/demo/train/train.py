@@ -283,11 +283,25 @@ if __name__ == '__main__':
     parser.add_argument('--loss_type',  type=str,  default='baseline', help='loss weighting method')
     args = parser.parse_args()
 
-    #working env
-    device = torch.device("cuda:{}".format(args.gpu))
+    # #working env
+    # device = torch.device("cuda:{}".format(args.gpu))
+    # torch.manual_seed(0)
+    # torch.cuda.manual_seed(0) 
+    # torch.backends.cudnn.benchmark = True
+
+    if torch.cuda.is_available():
+        device = torch.device(f"cuda:{args.gpu}")
+        torch.backends.cudnn.benchmark = True
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
+
     torch.manual_seed(0)
-    torch.cuda.manual_seed(0) 
-    torch.backends.cudnn.benchmark = True
+    if device.type == "cuda":
+        torch.cuda.manual_seed(0)
+    elif device.type == "mps":
+        torch.mps.manual_seed(0)    
     
     # Model, optimizer, and data loaders initialization
     model = UNet(kc=args.kc, inc=args.inch, ouc=args.inch).to(device)
