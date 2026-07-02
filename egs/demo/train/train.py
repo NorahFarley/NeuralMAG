@@ -70,6 +70,9 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
         #     grad1 = gradient_magnitude(x1)
         #     weight1 = 1 + args.alpha * grad1    
 
+        wd1 = wd1.unsqueeze(1)
+        wd2 = wd2.unsqueeze(1)
+        wd3 = wd3.unsqueeze(1)
     
         if epoch == 0 and batch_idx == 0:
             print("\n========== Weight Statistics ==========")
@@ -142,9 +145,6 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
                 json.dump(wd_stats, f, indent=4)
 
 
-        wd1 = wd1.unsqueeze(1)
-        wd2 = wd2.unsqueeze(1)
-        wd3 = wd3.unsqueeze(1)
 
         weight1 = 1 + alpha * torch.abs(wd1)
         weight2 = 1 + alpha * torch.abs(wd2)
@@ -344,14 +344,14 @@ if __name__ == '__main__':
     print('batch size 1 2 3: ',bsz1, bsz2, bsz3,'\n')
 
 
-    train_dataloader1 = torch.utils.data.DataLoader(dataset=train_dataset1, batch_size=bsz1, shuffle=True,  num_workers=8, drop_last=False)
-    train_dataloader2 = torch.utils.data.DataLoader(dataset=train_dataset2, batch_size=bsz2, shuffle=True,  num_workers=8, drop_last=False)
-    train_dataloader3 = torch.utils.data.DataLoader(dataset=train_dataset3, batch_size=bsz3, shuffle=True,  num_workers=8, drop_last=False)
+    train_dataloader1 = torch.utils.data.DataLoader(dataset=train_dataset1, batch_size=bsz1, shuffle=True,  num_workers=0, drop_last=False)
+    train_dataloader2 = torch.utils.data.DataLoader(dataset=train_dataset2, batch_size=bsz2, shuffle=True,  num_workers=0, drop_last=False)
+    train_dataloader3 = torch.utils.data.DataLoader(dataset=train_dataset3, batch_size=bsz3, shuffle=True,  num_workers=0, drop_last=False)
     
-    test_dataloader1  = torch.utils.data.DataLoader(dataset=test_dataset1,  batch_size=500, shuffle=True,  num_workers=8, drop_last=False)
-    test_dataloader2  = torch.utils.data.DataLoader(dataset=test_dataset2,  batch_size=500, shuffle=True,  num_workers=8, drop_last=False)
-    test_dataloader3  = torch.utils.data.DataLoader(dataset=test_dataset3,  batch_size=500, shuffle=True,  num_workers=8, drop_last=False)
-    test_dataloader4  = torch.utils.data.DataLoader(dataset=test_dataset4,  batch_size=500, shuffle=True,  num_workers=8, drop_last=False)
+    test_dataloader1  = torch.utils.data.DataLoader(dataset=test_dataset1,  batch_size=100, shuffle=True,  num_workers=0, drop_last=False) #changed batch size from 500 and num workers from 8 on all
+    test_dataloader2  = torch.utils.data.DataLoader(dataset=test_dataset2,  batch_size=100, shuffle=True,  num_workers=0, drop_last=False)
+    test_dataloader3  = torch.utils.data.DataLoader(dataset=test_dataset3,  batch_size=100, shuffle=True,  num_workers=0, drop_last=False)
+    test_dataloader4  = torch.utils.data.DataLoader(dataset=test_dataset4,  batch_size=100, shuffle=True,  num_workers=0, drop_last=False)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
