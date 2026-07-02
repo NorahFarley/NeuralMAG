@@ -9,7 +9,7 @@ import torch.optim as optimizer
 
 from Unet import UNet
 from data_load import *
-from utils import AverageMeter , dataug , create_mask , mse , visualize , ISLA , SLA 
+from utils import *
 
 
 def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_dataloader3):
@@ -84,9 +84,9 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
 
     #draw every 10 epoch
     if epoch > 0 and epoch % 10 == 0: 
-        visualize('train', epoch, args.ckpt_path, x1, y1, ISLA(pred_y1), 32)
-        visualize('train', epoch, args.ckpt_path, x2, y2, ISLA(pred_y2), 64)
-        visualize('train', epoch, args.ckpt_path, x3, y3, ISLA(pred_y3), 96)
+        visualize('train', epoch, ex_path, x1, y1, ISLA(pred_y1), 32)
+        visualize('train', epoch, ex_path, x2, y2, ISLA(pred_y2), 64)
+        visualize('train', epoch, ex_path, x3, y3, ISLA(pred_y3), 96)
 
     return Loss.avg
 
@@ -144,10 +144,10 @@ def eval(epoch, model, dataloader1, dataloader2, dataloader3, dataloader4):
     
     #draw every 10 epoch
     if epoch > 0 and epoch % 10 == 0: 
-        visualize('eval', epoch, args.ckpt_path, x1, y1, ISLA(pred_y1), 32)
-        visualize('eval', epoch, args.ckpt_path, x2, y2, ISLA(pred_y2), 64)
-        visualize('eval', epoch, args.ckpt_path, x3, y3, ISLA(pred_y3), 96)
-        visualize('eval', epoch, args.ckpt_path, x4, y4, ISLA(pred_y4), 128)
+        visualize('eval', epoch, ex_path, x1, y1, ISLA(pred_y1), 32)
+        visualize('eval', epoch, ex_path, x2, y2, ISLA(pred_y2), 64)
+        visualize('eval', epoch, ex_path, x3, y3, ISLA(pred_y3), 96)
+        visualize('eval', epoch, ex_path, x4, y4, ISLA(pred_y4), 128)
 
     return Loss1.avg, Loss2.avg, Loss3.avg, Loss4.avg, Loss.avg
 
@@ -170,20 +170,6 @@ if __name__ == '__main__':
     parser.add_argument('--gpu',        type=int,   default=0,      help='GPU used (default: 0)')
     parser.add_argument('--ex',         type=float, default=1.0,    help='experiment (default: 0)')
     parser.add_argument('--dataug',     type=bool,  default=True,   help='data augmentation (default: False)')
-
-    # ====================================================================================
-    # PARSER ARGUMENTS FOR DATASET PATHS (ADDED)
-    # ====================================================================================
-    parser.add_argument('--path32', type=str, required=True, help='Path to size 32 dataset')
-    parser.add_argument('--path64', type=str, required=True, help='Path to size 64 dataset')
-    parser.add_argument('--path96', type=str, required=True, help='Path to size 96 dataset')
-    parser.add_argument('--path128', type=str, required=True, help='Path to size 128 test set')
-    parser.add_argument('--model_name', type=str, default='model.pt', help='Output filename for the trained model')
-    parser.add_argument('--spin_file',  type=str, default='Spins.npy', help='Target numpy file for spins')
-    parser.add_argument('--hd_file',    type=str, default='Hds.npy', help='Target numpy file for demag field')
-    parser.add_argument('--ckpt_path', type=str, default= './ckpt', help='Directory to save model checkpoints and logs')
-    # ====================================================================================
-
     args = parser.parse_args()
 
     #working env
@@ -197,44 +183,32 @@ if __name__ == '__main__':
     optim = optimizer.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=0.0001)
 
     #load data
-    # data_path11 = '../../../utils/Dataset/data_Hd32_Hext1000_mask'
-    # data_path12 = '../../../utils/Dataset/data_Hd32_Hext100_mask'
-    # data_path13 = '../../../utils/Dataset/data_Hd32_Hext0'
+    data_path11 = '../../../utils/Dataset/data_Hd32_Hext1000_mask'
+    data_path12 = '../../../utils/Dataset/data_Hd32_Hext100_mask'
+    data_path13 = '../../../utils/Dataset/data_Hd32_Hext0'
 
-    # data_path21 = '../../../utils/Dataset/data_Hd64_Hext1000_mask'
-    # data_path22 = '../../../utils/Dataset/data_Hd64_Hext100_mask'
-    # data_path23 = '../../../utils/Dataset/data_Hd64_Hext0'
+    data_path21 = '../../../utils/Dataset/data_Hd64_Hext1000_mask'
+    data_path22 = '../../../utils/Dataset/data_Hd64_Hext100_mask'
+    data_path23 = '../../../utils/Dataset/data_Hd64_Hext0'
 
-    # data_path31 = '../../../utils/Dataset/data_Hd96_Hext1000_mask'
-    # data_path32 = '../../../utils/Dataset/data_Hd96_Hext100_mask'
-    # data_path33 = '../../../utils/Dataset/data_Hd96_Hext0'
+    data_path31 = '../../../utils/Dataset/data_Hd96_Hext1000_mask'
+    data_path32 = '../../../utils/Dataset/data_Hd96_Hext100_mask'
+    data_path33 = '../../../utils/Dataset/data_Hd96_Hext0'
 
-    # data_path41 = '../../../utils/Dataset/data_Hd128_Hext1000_mask'
-    # data_path42 = '../../../utils/Dataset/data_Hd128_Hext100_mask'
-    # data_path43 = '../../../utils/Dataset/data_Hd128_Hext0'
+    data_path41 = '../../../utils/Dataset/data_Hd128_Hext1000_mask'
+    data_path42 = '../../../utils/Dataset/data_Hd128_Hext100_mask'
+    data_path43 = '../../../utils/Dataset/data_Hd128_Hext0'
     
-    # data_path1 = [data_path11, data_path12, data_path13]
-    # data_path2 = [data_path21, data_path22, data_path23]
-    # data_path3 = [data_path31, data_path32, data_path33]
-    # data_path4 = [data_path41, data_path42, data_path43]
+    data_path1 = [data_path11, data_path12, data_path13]
+    data_path2 = [data_path21, data_path22, data_path23]
+    data_path3 = [data_path31, data_path32, data_path33]
+    data_path4 = [data_path41, data_path42, data_path43]
 
-    # train_dataset1, test_dataset1 = dataset_prepare(data_path1, ntest=args.ntest, n128=args.ntest, ntrain=args.ntrain, cn=args.cornum)
-    # train_dataset2, test_dataset2 = dataset_prepare(data_path2, ntest=args.ntest, n128=args.ntest, ntrain=args.ntrain, cn=args.cornum)
-    # train_dataset3, test_dataset3 = dataset_prepare(data_path3, ntest=args.ntest, n128=args.ntest, ntrain=args.ntrain, cn=args.cornum)
-    # test_dataset4 = dataset_prepare(data_path4, ntest=0, n128=args.ntest, ntrain=0, cn=args.cornum, mode='eval128')
-    
-    # ================================================================================================================================
-    # PREPARING DATASETS (commented authors hardcoded paths) (ADDED)
-    # ================================================================================================================================
-    # Prepare the 3 training sizes (32, 64, 96)
-    train_dataset1, test_dataset1 = dataset_prepare(data_paths=[args.path32], ntest=args.ntest, n128=0, ntrain=args.ntrain, cn=3, spin_file=args.spin_file, hd_file=args.hd_file)
-    train_dataset2, test_dataset2 = dataset_prepare(data_paths=[args.path64], ntest=args.ntest, n128=0, ntrain=args.ntrain, cn=3, spin_file=args.spin_file, hd_file=args.hd_file)
-    train_dataset3, test_dataset3 = dataset_prepare(data_paths=[args.path96], ntest=args.ntest, n128=0, ntrain=args.ntrain, cn=3, spin_file=args.spin_file, hd_file=args.hd_file)
-    
-     # Prepare the Size 128 evaluation set (uses n128 parameter instead of ntrain/ntest)
-    test_dataset4 = dataset_prepare(data_paths=[args.path128], ntest=0, n128=args.ntest, ntrain=0, cn=3, spin_file=args.spin_file, hd_file=args.hd_file, mode='eval128')
+    train_dataset1, test_dataset1 = dataset_prepare(data_path1, ntest=args.ntest, n128=args.ntest, ntrain=args.ntrain, cn=args.cornum)
+    train_dataset2, test_dataset2 = dataset_prepare(data_path2, ntest=args.ntest, n128=args.ntest, ntrain=args.ntrain, cn=args.cornum)
+    train_dataset3, test_dataset3 = dataset_prepare(data_path3, ntest=args.ntest, n128=args.ntest, ntrain=args.ntrain, cn=args.cornum)
+    test_dataset4 = dataset_prepare(data_path4, ntest=0, n128=args.ntest, ntrain=0, cn=args.cornum, mode='eval128')
 
-    # ================================================================================================================================
 
     bsz1=args.batch_size
     print('samples 1 2 3:',len(train_dataset1), len(train_dataset2), len(train_dataset3))
@@ -252,30 +226,15 @@ if __name__ == '__main__':
     test_dataloader3  = torch.utils.data.DataLoader(dataset=test_dataset3,  batch_size=500, shuffle=True,  num_workers=8, drop_last=False)
     test_dataloader4  = torch.utils.data.DataLoader(dataset=test_dataset4,  batch_size=500, shuffle=True,  num_workers=8, drop_last=False)
 
-    # #experiment path
-    # args.ckpt_path='./ex{}_bsz{}_Ir{}_Unet_kc{}_inch{}'.format(
-    #         args.ex, bsz1, args.lr, args.kc, args.inch
-    #         )
-    # os.makedirs(args.ckpt_path, exist_ok=True)
+    #experiment path
+    ex_path='./ex{}_bsz{}_Ir{}_Unet_kc{}_inch{}'.format(
+            args.ex, bsz1, args.lr, args.kc, args.inch
+            )
+    os.makedirs(ex_path, exist_ok=True)
 
-    # # Set up logging
-    # logging.basicConfig(filename=args.ckpt_path + '/training.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    # Set up logging
+    logging.basicConfig(filename=ex_path + '/training.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-    
-
-    # ==========================================
-    # LOGGING SETUP (ADDED)
-    # ==========================================
-    # Create the base checkpoint directory
-    os.makedirs(args.ckpt_path, exist_ok=True)
-    
-    # Create log file name
-    log_filename = args.model_name.replace('.pt', '.log')
-    log_path = os.path.join(args.ckpt_path, log_filename)
-    
-    # Set up logging to use your new dynamic file
-    logging.basicConfig(filename=log_path, level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-    # ==========================================
 
     loss_train_list = []
     loss_test_list1 = []
@@ -304,18 +263,16 @@ if __name__ == '__main__':
         loss_test_list4.append(loss_test4)
 
         #model save path
-        save_path = os.path.join(args.ckpt_path, args.model_name)
-        os.makedirs(args.ckpt_path, exist_ok=True)
+        model_path = ex_path + "/ckpt/"
+        os.makedirs(model_path, exist_ok=True)
 
         #save best model checkpoint
         loss_test = (loss_test1+loss_test2+loss_test3)/3
         if loss_test < best_loss:
             print('loss_test: {:.1f} < best_loss: {:.1f} \n'.format(loss_test, best_loss))
             best_loss = loss_test
-
-            torch.save(model.state_dict(), save_path)
-            print(f"\n*** Epoch {epoch}: New best model saved to {save_path} (Loss: {best_loss:.6f}) ***\n")
-
+            best_model_state_dict = model.state_dict()
+            torch.save(best_model_state_dict, f"{model_path}/best_model_{best_loss:.1f}.pt")
 
 
         # draw loss_train and loss_test
@@ -329,4 +286,4 @@ if __name__ == '__main__':
         plt.xlabel('epoch')
         plt.ylabel('loss-log')
         plt.yscale('log')  # set y-axis scale to logarithmic
-        plt.savefig(args.ckpt_path + '/loss_ex{}.png'.format(args.ex))
+        plt.savefig(ex_path + '/loss_ex{}.png'.format(args.ex))
