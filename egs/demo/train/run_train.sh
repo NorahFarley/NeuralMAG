@@ -13,4 +13,4 @@ python ./train.py --batch-size 100 \
                 --gpu 0 \
                 --ex 1.0 \
                 --alpha 0.5 \
-                --loss_type "winding"
+                --loss_type "baseline"
