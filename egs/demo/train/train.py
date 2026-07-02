@@ -300,7 +300,7 @@ if __name__ == '__main__':
     parser.add_argument('--gpu',        type=int,   default=0,      help='GPU used (default: 0)')
     parser.add_argument('--ex',         type=float, default=1.0,    help='experiment (default: 0)')
     parser.add_argument('--dataug',     type=bool,  default=True,   help='data augmentation (default: False)')
-    parser.add_argument('--alpha',      type=float, default=0.5,    help='weighting coefficient for topology-aware loss')
+    parser.add_argument('--alpha',      type=float, default=0.5,    help='weighting coefficient for weighted loss')
     parser.add_argument('--loss_type',  type=str,  default='baseline', help='loss weighting method')
     args = parser.parse_args()
 
@@ -312,11 +312,15 @@ if __name__ == '__main__':
     # torch.cuda.manual_seed(0) 
     # torch.backends.cudnn.benchmark = True
 
-
-
     if torch.cuda.is_available():
         device = torch.device(f"cuda:{args.gpu}")
         print(device, flush=True)
+        print(
+        f"GPU allocated: {torch.cuda.memory_allocated()/1024**3:.2f} GB"
+        )
+        print(
+            f"GPU reserved : {torch.cuda.memory_reserved()/1024**3:.2f} GB"
+        )
         torch.backends.cudnn.benchmark = True
     elif torch.backends.mps.is_available():
         device = torch.device("mps")

@@ -102,22 +102,28 @@ def dataset_prepare(data_paths, ntest, n128, ntrain, cn, mode=None):
         test_dataset  = torch.utils.data.TensorDataset(X_test_tensor, y_test_tensor)
         return test_dataset
     else:
+        print_memory("Before getdata")
         print("Loading training data...", flush=True)
         X_train, Y_train, X_test, Y_test = getdata(data_paths, ntest, n128, ntrain, cn)
         print("Finished getdata()", flush=True)
         print(X_train.shape, Y_train.shape, flush=True)
+        print_memory("Before getdata")
         #prepare training set
         X_train_tensor = torch.from_numpy(X_train).float()
         print("Finished converting X_train to tensor", flush=True)
+        print_memory("Before getdata")
         y_train_tensor = torch.from_numpy(Y_train).float()
         print("Finished converting Y_train to tensor", flush=True)
+        print_memory("Before getdata")
         print("Loading testing data...", flush=True)
         train_dataset  = torch.utils.data.TensorDataset(X_train_tensor, y_train_tensor)
         #prepare test set
         X_test_tensor = torch.from_numpy(X_test).float()
         print("Finished converting X_test to tensor", flush=True)
+        print_memory("Before getdata")
         y_test_tensor = torch.from_numpy(Y_test).float()
         print("Finished converting Y_test to tensor", flush=True)
+        print_memory("Before getdata")
         test_dataset  = torch.utils.data.TensorDataset(X_test_tensor, y_test_tensor)
         return train_dataset, test_dataset
 

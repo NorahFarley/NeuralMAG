@@ -5,6 +5,9 @@ from PIL import Image
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
+import os
+import psutil
+
 import torch
 import torchvision.utils as vutils
 import torchvision.transforms.functional as Func
@@ -195,6 +198,11 @@ def gradient_magnitude(spin_batch):
     grad_mag = torch.sqrt(grad_sq)
 
     return grad_mag
+
+def print_memory(msg=""):
+    process = psutil.Process(os.getpid())
+    mem = process.memory_info().rss / (1024**3)
+    print(f"{msg} | RAM: {mem:.2f} GB", flush=True)
 
 def tensor_rotate(tensor, symtype=None):
     #spins(bsz,w,h,channel)
