@@ -16,6 +16,7 @@ def prepare_model(args):
     print('Creating {} layer models \n'.format(args.layers))
 
     # Initialize demag matrix
+    print(f"error convergence is set to: {args.error_min}")
     time_start = time.time()
     film.DemagInit()
     time_finish = time.time()
@@ -23,12 +24,36 @@ def prepare_model(args):
     return film
 
 def generate_data(args, film):
-    Hext_val = np.random.randn(3) * args.Hext_val
-    Hext = Hext_val * args.Hext_vec
 
+    # Hext_val = np.random.randn(3) * args.Hext_val
+    # Hext = Hext_val * args.Hext_vec
     for seed in tqdm(range(0, args.nseeds)):
+    #-----------------------------------------
+        if args.Hext_val == 0:
+            # If you pass 0 in run.sh
+            Hext = np.array([0.0, 0.0, 0.0])
+            magnitude = 0
+        else:
+            # Pick a completely random angle in radians for the in-plane orientation
+            angle = np.random.uniform(0, 2 * np.pi)
+
+            # Pick a random field magnitude strictly bounded between 100 and 1000 Oe
+            magnitude = np.random.uniform(100, 1000)
+
+            # Construct the clean, physical 3D vector (X and Y plane, Z is 0 for thin film)
+            Hext = np.array([
+                magnitude * np.cos(angle),  # Hx
+                magnitude * np.sin(angle),  # Hy
+                0.0                         # Hz (strictly in-plane)
+            ])
+    #-----------------------------------------
+
+    #for seed in tqdm(range(0, args.nseeds)):
         path_format = './Dataset/data_Hd{}_Hext{}_mask/seed{}' if args.mask=='True' else './Dataset/data_Hd{}_Hext{}/seed{}'
-        save_path = path_format.format(args.w, int(args.Hext_val), seed)
+        
+        #save_path = path_format.format(args.w, int(args.Hext_val), seed)
+
+        save_path = path_format.format(args.w, int(magnitude), seed)
         os.makedirs(save_path, exist_ok=True)
 
         spin = initial_spin_prepare(args.w, args.layers, seed)
@@ -111,6 +136,7 @@ if __name__ == '__main__':
     args = parser.parse_args() 
 
     device = torch.device("cuda:{}".format(args.gpu))
+
     
     #Prepare MAG model: film
     film = prepare_model(args)

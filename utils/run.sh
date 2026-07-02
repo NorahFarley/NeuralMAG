@@ -9,11 +9,11 @@ nseeds=100
 max_iter=50000
 
 # Run the Python script for different combinations of width, Hext_val, and mask
-for w in 32 64 96 128; do
-    # When Hext_val is 0, set mask to False
+for w in 32 64 96; do
+    # When Hext_val is non zero the Hext is randomized
     python -m utils.gen_data \
         --w $w \
-        --Hext_val 0 \
+        --Hext_val 1000 \
         --nseeds $nseeds \
         --mask 'False' \
         --gpu $gpu \
@@ -30,3 +30,13 @@ for w in 32 64 96 128; do
             --max_iter $max_iter
     done
 done
+
+for w in 128; do
+        python -m utils.gen_data \
+            --w $w \
+            --Hext_val 0 \
+            --nseeds $nseeds \
+            --mask 'False' \
+            --gpu $gpu \
+            --max_iter $max_iter
+    done
