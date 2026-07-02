@@ -54,8 +54,8 @@ def combinfilter(x_paths, y_paths, cn):
     selected_y = []
     a=0
     for x_path, y_path in zip(x_paths, y_paths):
-        x_array = np.load(x_path).transpose((0, 3, 1, 2))
-        y_array = np.load(y_path).transpose((0, 3, 1, 2))
+        x_array = np.load(x_path, mmap_mode='r').transpose((0, 3, 1, 2))
+        y_array = np.load(y_path, mmap_mode='r').transpose((0, 3, 1, 2))
         
         # randomly select half of the data
         indices = np.random.choice(x_array.shape[0], 500, replace=False)
@@ -107,23 +107,19 @@ def dataset_prepare(data_paths, ntest, n128, ntrain, cn, mode=None):
         X_train, Y_train, X_test, Y_test = getdata(data_paths, ntest, n128, ntrain, cn)
         print("Finished getdata()", flush=True)
         print(X_train.shape, Y_train.shape, flush=True)
-        print_memory("Before getdata")
+        print_memory("After getdata")
         #prepare training set
         X_train_tensor = torch.from_numpy(X_train).float()
         print("Finished converting X_train to tensor", flush=True)
-        print_memory("Before getdata")
         y_train_tensor = torch.from_numpy(Y_train).float()
         print("Finished converting Y_train to tensor", flush=True)
-        print_memory("Before getdata")
         print("Loading testing data...", flush=True)
         train_dataset  = torch.utils.data.TensorDataset(X_train_tensor, y_train_tensor)
         #prepare test set
         X_test_tensor = torch.from_numpy(X_test).float()
         print("Finished converting X_test to tensor", flush=True)
-        print_memory("Before getdata")
         y_test_tensor = torch.from_numpy(Y_test).float()
         print("Finished converting Y_test to tensor", flush=True)
-        print_memory("Before getdata")
         test_dataset  = torch.utils.data.TensorDataset(X_test_tensor, y_test_tensor)
         return train_dataset, test_dataset
 

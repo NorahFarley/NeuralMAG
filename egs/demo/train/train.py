@@ -433,6 +433,7 @@ if __name__ == '__main__':
     loss_test_list4 = []
     epoch_list = []
     best_loss = float('inf')
+    best_epoch = -1
 
     start_time = time.time()
 
@@ -513,5 +514,5 @@ if __name__ == '__main__':
 
     logging.info(f"Training time: {elapsed:.2f} seconds")
     logging.info(f"Training time: {elapsed/60:.2f} minutes")
-    logging.info(json.dump(experiment_info, f, indent=4))  
+    logging.info(json.dumps(experiment_info, indent=4))  
 
