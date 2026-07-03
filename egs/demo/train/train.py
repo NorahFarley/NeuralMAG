@@ -74,9 +74,13 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
             wd2 = gradient_magnitude(x2)**2
             wd3 = gradient_magnitude(x3)**2
 
-
         else:
             raise ValueError(f"Unknown loss_type: {args.loss_type}")
+
+        if args.loss_type != "baseline":
+            weight1 = 1 + alpha * torch.abs(wd1)
+            weight2 = 1 + alpha * torch.abs(wd2)
+            weight3 = 1 + alpha * torch.abs(wd3)
 
         wd1 = wd1.unsqueeze(1)
         wd2 = wd2.unsqueeze(1)
@@ -161,11 +165,6 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(wd_stats, f, indent=4)
 
-
-        if args.loss_type != "baseline":
-            weight1 = 1 + alpha * torch.abs(wd1)
-            weight2 = 1 + alpha * torch.abs(wd2)
-            weight3 = 1 + alpha * torch.abs(wd3)
 
        # weight1 = 1 + alpha * wd1 + beta * wd1_2 #winding/gradient
 
