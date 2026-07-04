@@ -48,9 +48,9 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
         alpha = args.alpha
 
         if args.loss_type == "baseline":
-            wd1 = 1
-            wd2 = 1
-            wd3 = 1   
+            weight1 = 1
+            weight2 = 1
+            weight3 = 1   
             
         elif args.loss_type == "divergence":
             wd1 = magnetic_divergence(x1)
@@ -82,9 +82,9 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
             weight2 = 1 + alpha * torch.abs(wd2)
             weight3 = 1 + alpha * torch.abs(wd3)
 
-        wd1 = wd1.unsqueeze(1)
-        wd2 = wd2.unsqueeze(1)
-        wd3 = wd3.unsqueeze(1)
+            wd1 = wd1.unsqueeze(1)
+            wd2 = wd2.unsqueeze(1)
+            wd3 = wd3.unsqueeze(1)
     
         if epoch == 0 and batch_idx == 0:
             print("\n========== Weight Statistics ==========")
