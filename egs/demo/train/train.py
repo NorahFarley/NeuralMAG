@@ -48,9 +48,9 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
         alpha = args.alpha
 
         if args.loss_type == "baseline":
-            weight1 = 1
-            weight2 = 1
-            weight3 = 1   
+            wd1 = 1
+            wd2 = 1
+            wd3 = 1   
             
         elif args.loss_type == "divergence":
             wd1 = magnetic_divergence(x1)
