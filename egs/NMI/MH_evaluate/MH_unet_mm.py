@@ -19,7 +19,7 @@ from libs.Unet import UNet
 def load_unet_model(args):
     # load Unet Model
     model = UNet(kc=args.krn, inc=args.layers*3, ouc=args.layers*3).eval().to(device)
-    ckpt = '../ckpt/k{}/model.pt'.format(args.krn)
+    ckpt = '../ckpt/k{}/{}}'.format(args.krn, args.model_name)
     model.load_state_dict(torch.load(ckpt, map_location=device))
     MAG2305.load_model(model)
     print('Unet model loaded from {}'.format(ckpt))
@@ -206,6 +206,8 @@ if __name__ == '__main__':
     parser.add_argument('--max_iter',    type=int,    default=100000,    help='max iteration number (default: 100000)')
     parser.add_argument('--mask',        type=MaskTp, default=False,     help='mask (default: False)')
     parser.add_argument('--loss_type',  type=str,  default='baseline', help='loss weighting method')
+    parser.add_argument('--model_name',  type=str,  default='model.pt', help='name of model')
+
     args = parser.parse_args() 
     
     device = torch.device("cuda:{}".format(args.gpu))
