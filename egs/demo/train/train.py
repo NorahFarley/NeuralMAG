@@ -78,87 +78,89 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
             raise ValueError(f"Unknown loss_type: {args.loss_type}")
 
         if args.loss_type != "baseline":
+            wd1 = wd1.unsqueeze(1)
+            wd2 = wd2.unsqueeze(1)
+            wd3 = wd3.unsqueeze(1)
+
             weight1 = 1 + alpha * torch.abs(wd1)
             weight2 = 1 + alpha * torch.abs(wd2)
             weight3 = 1 + alpha * torch.abs(wd3)
 
-            wd1 = wd1.unsqueeze(1)
-            wd2 = wd2.unsqueeze(1)
-            wd3 = wd3.unsqueeze(1)
+
     
-        if epoch == 0 and batch_idx == 0:
-            print("\n========== Weight Statistics ==========")
-            print("32x32", flush=True)
-            print("min:", wd1.min().item())
-            print("max:", wd1.max().item())
-            print("mean:", wd1.mean().item())
-            print("std:", wd1.std().item())
+            if epoch == 0 and batch_idx == 0:
+                print("\n========== Weight Statistics ==========")
+                print("32x32", flush=True)
+                print("min:", wd1.min().item())
+                print("max:", wd1.max().item())
+                print("mean:", wd1.mean().item())
+                print("std:", wd1.std().item())
 
-            print("64x64", flush=True)
-            print("min:", wd2.min().item())
-            print("max:", wd2.max().item())
-            print("mean:", wd2.mean().item())
-            print("std:", wd2.std().item())
+                print("64x64", flush=True)
+                print("min:", wd2.min().item())
+                print("max:", wd2.max().item())
+                print("mean:", wd2.mean().item())
+                print("std:", wd2.std().item())
 
-            print("96x96", flush=True)
-            print("min:", wd3.min().item())
-            print("max:", wd3.max().item())
-            print("mean:", wd3.mean().item())
-            print("std:", wd3.std().item())
+                print("96x96", flush=True)
+                print("min:", wd3.min().item())
+                print("max:", wd3.max().item())
+                print("mean:", wd3.mean().item())
+                print("std:", wd3.std().item())
 
-            wd_abs_32 = torch.abs(wd1)
-            wd_abs_64 = torch.abs(wd2)
-            wd_abs_96 = torch.abs(wd3)
+                wd_abs_32 = torch.abs(wd1)
+                wd_abs_64 = torch.abs(wd2)
+                wd_abs_96 = torch.abs(wd3)
 
-            print("max 32:", wd_abs_32.max().item())
-            print("min 32:", wd_abs_32.min().item())
-            print("abs mean 32:", wd_abs_32.mean().item())
-            print("abs std 32:", wd_abs_32.std().item())
-            print("99th percentile 32:", torch.quantile(wd_abs_32.flatten(), 0.99).item())
+                print("max 32:", wd_abs_32.max().item())
+                print("min 32:", wd_abs_32.min().item())
+                print("abs mean 32:", wd_abs_32.mean().item())
+                print("abs std 32:", wd_abs_32.std().item())
+                print("99th percentile 32:", torch.quantile(wd_abs_32.flatten(), 0.99).item())
 
-            print("max 64:", wd_abs_64.max().item())
-            print("min 64:", wd_abs_64.min().item())
-            print("abs mean 64:", wd_abs_64.mean().item())
-            print("abs std 64:", wd_abs_64.std().item())
-            print("99th percentile 64:", torch.quantile(wd_abs_64.flatten(), 0.99).item())
+                print("max 64:", wd_abs_64.max().item())
+                print("min 64:", wd_abs_64.min().item())
+                print("abs mean 64:", wd_abs_64.mean().item())
+                print("abs std 64:", wd_abs_64.std().item())
+                print("99th percentile 64:", torch.quantile(wd_abs_64.flatten(), 0.99).item())
 
-            print("max 96:", wd_abs_96.max().item())
-            print("min 96:", wd_abs_96.min().item())
-            print("abs mean 96:", wd_abs_96.mean().item())
-            print("abs std 96:", wd_abs_96.std().item())
-            print("99th percentile 96:", torch.quantile(wd_abs_96.flatten(), 0.99).item())
+                print("max 96:", wd_abs_96.max().item())
+                print("min 96:", wd_abs_96.min().item())
+                print("abs mean 96:", wd_abs_96.mean().item())
+                print("abs std 96:", wd_abs_96.std().item())
+                print("99th percentile 96:", torch.quantile(wd_abs_96.flatten(), 0.99).item())
 
-            wd_stats = {
-                "32": {
-                    "min": wd1.min().item(),
-                    "max": wd1.max().item(),
-                    "mean": wd1.mean().item(),
-                    "std": wd1.std().item(),
-                    "abs_mean": torch.abs(wd1).mean().item(),
-                    "abs_max": torch.abs(wd1).max().item(),
-                    "p99": torch.quantile(torch.abs(wd1).flatten(),0.99).item()
-                },
+                wd_stats = {
+                    "32": {
+                        "min": wd1.min().item(),
+                        "max": wd1.max().item(),
+                        "mean": wd1.mean().item(),
+                        "std": wd1.std().item(),
+                        "abs_mean": torch.abs(wd1).mean().item(),
+                        "abs_max": torch.abs(wd1).max().item(),
+                        "p99": torch.quantile(torch.abs(wd1).flatten(),0.99).item()
+                    },
 
-                "64": {
-                    "min": wd2.min().item(),
-                    "max": wd2.max().item(),
-                    "mean": wd2.mean().item(),
-                    "std": wd2.std().item(),
-                    "abs_mean": torch.abs(wd2).mean().item(),
-                    "abs_max": torch.abs(wd2).max().item(),
-                    "p99": torch.quantile(torch.abs(wd2).flatten(),0.99).item()
-                },
+                    "64": {
+                        "min": wd2.min().item(),
+                        "max": wd2.max().item(),
+                        "mean": wd2.mean().item(),
+                        "std": wd2.std().item(),
+                        "abs_mean": torch.abs(wd2).mean().item(),
+                        "abs_max": torch.abs(wd2).max().item(),
+                        "p99": torch.quantile(torch.abs(wd2).flatten(),0.99).item()
+                    },
 
-                "96": {
-                    "min": wd3.min().item(),
-                    "max": wd3.max().item(),
-                    "mean": wd3.mean().item(),
-                    "std": wd3.std().item(),
-                    "abs_mean": torch.abs(wd3).mean().item(),
-                    "abs_max": torch.abs(wd3).max().item(),
-                    "p99": torch.quantile(torch.abs(wd3).flatten(),0.99).item()
+                    "96": {
+                        "min": wd3.min().item(),
+                        "max": wd3.max().item(),
+                        "mean": wd3.mean().item(),
+                        "std": wd3.std().item(),
+                        "abs_mean": torch.abs(wd3).mean().item(),
+                        "abs_max": torch.abs(wd3).max().item(),
+                        "p99": torch.quantile(torch.abs(wd3).flatten(),0.99).item()
+                    }
                 }
-            }
 
             file_path = os.path.join(ex_path, f"{args.loss_type}_stats.json")
 
