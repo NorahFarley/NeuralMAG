@@ -19,7 +19,7 @@ from libs.Unet import UNet
 def load_unet_model(args):
     # load Unet Model
     model = UNet(kc=args.krn, inc=args.layers*3, ouc=args.layers*3).eval().to(device)
-    ckpt = '../ckpt/k{}/{}}'.format(args.krn, args.model_name)
+    ckpt = '../ckpt/k{}/{}'.format(args.krn, args.model_name)
     model.load_state_dict(torch.load(ckpt, map_location=device))
     MAG2305.load_model(model)
     print('Unet model loaded from {}'.format(ckpt))
