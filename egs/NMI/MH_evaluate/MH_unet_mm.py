@@ -287,10 +287,10 @@ if __name__ == '__main__':
         Hd_un = film2.Hd.detach().cpu().numpy()
 
         # Extract Hex and Hanis arrays from both models
-        Hex_mm = film1.Hex.detach().cpu().numpy()
-        Hex_un = film2.Hex.detach().cpu().numpy()
-        Hanis_mm = film1.Hanis.detach().cpu().numpy()
-        Hanis_un = film2.Hanis.detach().cpu().numpy()
+        Hex_mm = film1.He.detach().cpu().numpy()
+        Hex_un = film2.He.detach().cpu().numpy()
+        Hanis_mm = film1.Ha.detach().cpu().numpy()
+        Hanis_un = film2.Ha.detach().cpu().numpy()
 
         # Calculate the spatial average magnitude across the grid sample
         hex_mm_plot.append(np.mean(np.linalg.norm(Hex_mm, axis=-1)))
