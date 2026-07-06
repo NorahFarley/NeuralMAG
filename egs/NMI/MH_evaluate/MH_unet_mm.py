@@ -246,9 +246,21 @@ if __name__ == '__main__':
     spin_mm = np.array([[[[1]]]])
     spin_un = np.array([[[[1]]]])
 
-    # Error Tracking Lists
+    # Error Tracking Lists Hdemag
     instantaneous_hd_mae = []   # Local network prediction discrepancy at equilibrium
     trajectory_shift_mae = []   # Accumulated configuration divergence over historical path
+
+    # Initialize lists to track Hex and Hanis data across the loop
+    hex_mm_plot = []
+    hex_un_plot = []
+    hanis_mm_plot = []
+    hanis_un_plot = []
+    hd_mm_plot = []    
+    hd_un_plot = []
+
+    # Error accumulation tracking lists for intrinsic fields
+    hex_error_mae = []
+    hanis_error_mae = []
 
     # Main loop
     for nloop, Hext_val in enumerate(Hext_range):
@@ -267,6 +279,30 @@ if __name__ == '__main__':
         spin_un = film2.Spin.detach().cpu().numpy()
         Hd_mm = film1.Hd.detach().cpu().numpy()
         Hd_un = film2.Hd.detach().cpu().numpy()
+
+# Get spin and Hd
+        spin_mm = film1.Spin.detach().cpu().numpy()
+        spin_un = film2.Spin.detach().cpu().numpy()
+        Hd_mm = film1.Hd.detach().cpu().numpy()
+        Hd_un = film2.Hd.detach().cpu().numpy()
+
+        # Extract Hex and Hanis arrays from both models
+        Hex_mm = film1.Hex.detach().cpu().numpy()
+        Hex_un = film2.Hex.detach().cpu().numpy()
+        Hanis_mm = film1.Hanis.detach().cpu().numpy()
+        Hanis_un = film2.Hanis.detach().cpu().numpy()
+
+        # Calculate the spatial average magnitude across the grid sample
+        hex_mm_plot.append(np.mean(np.linalg.norm(Hex_mm, axis=-1)))
+        hex_un_plot.append(np.mean(np.linalg.norm(Hex_un, axis=-1)))
+        hanis_mm_plot.append(np.mean(np.linalg.norm(Hanis_mm, axis=-1)))
+        hanis_un_plot.append(np.mean(np.linalg.norm(Hanis_un, axis=-1)))
+        hd_mm_plot.append(np.mean(np.linalg.norm(Hd_mm, axis=-1)))      
+        hd_un_plot.append(np.mean(np.linalg.norm(Hd_un, axis=-1)))
+
+        # Calculate and record the Mean Absolute Error (MAE) between UNet and FFT fields
+        hex_error_mae.append(np.mean(np.abs(Hex_un - Hex_mm)))
+        hanis_error_mae.append(np.mean(np.abs(Hanis_un - Hanis_mm)))
 
         # Calculate and append tracking errors
         hd_error = np.mean(np.abs(Hd_un - Hd_mm))
@@ -339,3 +375,72 @@ if __name__ == '__main__':
     plt.savefig(filename + 'comprehensive_error_analysis.png', dpi=300)
     plt.close()
     print(f"Error metrics saved successfully to directory: {filename}")
+
+
+    # -----------------------------------------------------------------
+    # Generate Final Error Accumulation Plot for Intrinsic Fields
+    # -----------------------------------------------------------------
+    fig_field_err, (ax_ex_err, ax_an_err) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+    fig_field_err.suptitle('Intrinsic Field Deviation Analysis (UNet vs FFT)', fontsize=14, fontweight='bold')
+
+    # Subplot A: Exchange Field Discrepancy
+    ax_ex_err.plot(Hext_range, hex_error_mae, color='purple', lw=2, label='$H_{ex}$ Prediction Error')
+    ax_ex_err.set_ylabel('Exchange Field MAE [Oe]', fontsize=12)
+    ax_ex_err.title.set_text('Exchange Field Divergence at Transition Boundaries')
+    ax_ex_err.grid(True, linestyle='--', alpha=0.6)
+    ax_ex_err.legend(loc='upper right')
+
+    # Subplot B: Anisotropy Field Discrepancy
+    ax_an_err.plot(Hext_range, hanis_error_mae, color='teal', lw=2, label='$H_{anis}$ Prediction Error')
+    ax_an_err.set_xlabel('External Magnetic Field $H_{ext}$ [Oe]', fontsize=12)
+    ax_an_err.set_ylabel('Anisotropy Field MAE [Oe]', fontsize=12)
+    ax_an_err.title.set_text('Anisotropy Field Divergence at Transition Boundaries')
+    ax_an_err.grid(True, linestyle='--', alpha=0.6)
+    ax_an_err.legend(loc='upper right')
+
+    ax_an_err.set_xlim(max(Hext_range), min(Hext_range))
+
+    plt.tight_layout()
+    plt.savefig(filename + 'intrinsic_fields_error_analysis.png', dpi=300)
+    plt.close()
+    print(f"Summary graphs generated once and saved successfully to: {filename}")
+
+    # -----------------------------------------------------------------
+    # Generate Final Summary Plot for All Fields (Hex, Hanis, Hdemag)
+    # -----------------------------------------------------------------
+    print("Generating final 3-panel summary plot for all physical fields...")
+    fig_fields, (ax_ex, ax_an, ax_hd) = plt.subplots(1, 3, figsize=(18, 5))
+    
+    # 1. Exchange Field Plot (FFT = Blue Solid, UNet = Red Solid)
+    ax_ex.plot(Hext_range, hex_mm_plot, color='blue', lw=2.5, linestyle='-', label='FFT Simulator (mm)')
+    ax_ex.plot(Hext_range, hex_un_plot, color='red', lw=2.5, linestyle='-', label='UNet Model (un)')
+    ax_ex.set_title('Exchange Field ($H_{ex}$) vs $H_{ext}$', fontsize=12, fontweight='bold')
+    ax_ex.set_xlabel('External Field $H_{ext}$ [Oe]', fontsize=11)
+    ax_ex.set_ylabel('Mean $H_{ex}$ Magnitude [Oe]', fontsize=11)
+    ax_ex.grid(True, linestyle='-.', alpha=0.5)
+    ax_ex.legend(fontsize=10)
+    ax_ex.set_xlim(max(Hext_range), min(Hext_range)) # Reverses axis to match physical sweep direction
+
+    # 2. Anisotropy Field Plot (FFT = Blue Solid, UNet = Red Solid)
+    ax_an.plot(Hext_range, hanis_mm_plot, color='blue', lw=2.5, linestyle='-', label='FFT Simulator (mm)')
+    ax_an.plot(Hext_range, hanis_un_plot, color='red', lw=2.5, linestyle='-', label='UNet Model (un)')
+    ax_an.set_title('Anisotropy Field ($H_{anis}$) vs $H_{ext}$', fontsize=12, fontweight='bold')
+    ax_an.set_xlabel('External Field $H_{ext}$ [Oe]', fontsize=11)
+    ax_an.set_ylabel('Mean $H_{anis}$ Magnitude [Oe]', fontsize=11)
+    ax_an.grid(True, linestyle='-.', alpha=0.5)
+    ax_an.legend(fontsize=10)
+    ax_an.set_xlim(max(Hext_range), min(Hext_range))
+
+    # 3. Demagnetizing Field Plot (FFT = Blue Solid, UNet = Red Solid)
+    ax_hd.plot(Hext_range, hd_mm_plot, color='blue', lw=2.5, linestyle='-', label='FFT Simulator (mm)')
+    ax_hd.plot(Hext_range, hd_un_plot, color='red', lw=2.5, linestyle='-', label='UNet Model (un)')
+    ax_hd.set_title('Demagnetizing Field ($H_{demag}$) vs $H_{ext}$', fontsize=12, fontweight='bold')
+    ax_hd.set_xlabel('External Field $H_{ext}$ [Oe]', fontsize=11)
+    ax_hd.set_ylabel('Mean $H_{demag}$ Magnitude [Oe]', fontsize=11)
+    ax_hd.grid(True, linestyle='-.', alpha=0.5)
+    ax_hd.legend(fontsize=10)
+    ax_hd.set_xlim(max(Hext_range), min(Hext_range))
+
+    plt.tight_layout()
+    plt.savefig(filename + 'all_internal_fields_mh_sweep.png', dpi=300)
+    plt.close()

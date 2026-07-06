@@ -70,9 +70,14 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
         elif args.loss_type == "exchange_energy": #exchange energy density
             #Since all simulations use the same exchange stiffness, the constant 
             # factor was absorbed into the weighting coefficient α.
-            wd1 = gradient_magnitude(x1)**2
+            wd1 = gradient_magnitude(x1)**2 
             wd2 = gradient_magnitude(x2)**2
             wd3 = gradient_magnitude(x3)**2
+
+        # elif args.loss_type == "precision_torque":
+        #     wd1 = 'fill in later'
+        #     wd2 = 'fill in later'
+        #     wd3 = 'fill in later'
 
         else:
             raise ValueError(f"Unknown loss_type: {args.loss_type}")
