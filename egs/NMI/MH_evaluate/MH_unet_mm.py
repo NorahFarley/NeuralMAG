@@ -277,20 +277,14 @@ if __name__ == '__main__':
         # get spin and Hd
         spin_mm = film1.Spin.detach().cpu().numpy()
         spin_un = film2.Spin.detach().cpu().numpy()
-        Hd_mm = film1.Hd.detach().cpu().numpy()
-        Hd_un = film2.Hd.detach().cpu().numpy()
-
-# Get spin and Hd
-        spin_mm = film1.Spin.detach().cpu().numpy()
-        spin_un = film2.Spin.detach().cpu().numpy()
-        Hd_mm = film1.Hd.detach().cpu().numpy()
-        Hd_un = film2.Hd.detach().cpu().numpy()
+        Hd_mm = film1.Demag.detach().cpu().numpy()
+        Hd_un = film2.Demag.detach().cpu().numpy()
 
         # Extract Hex and Hanis arrays from both models
-        Hex_mm = film1.He.detach().cpu().numpy()
-        Hex_un = film2.He.detach().cpu().numpy()
-        Hanis_mm = film1.Ha.detach().cpu().numpy()
-        Hanis_un = film2.Ha.detach().cpu().numpy()
+        Hex_mm = film1.Anisotropy.detach().cpu().numpy()
+        Hex_un = film2.Anisotropy.detach().cpu().numpy()
+        Hanis_mm = film1.Exchange.detach().cpu().numpy()
+        Hanis_un = film2.Exchange.detach().cpu().numpy()
 
         # Calculate the spatial average magnitude across the grid sample
         hex_mm_plot.append(np.mean(np.linalg.norm(Hex_mm, axis=-1)))
