@@ -538,7 +538,7 @@ def plot_iteration_energy(hist_fft, hist_un, base_path, nloop, Hext_val, args, s
             ax.set_ylim(ymin, ymax)
             
         ax.set_xlim(0, global_xmax_padded)
-        ax.set_grid(True, linestyle='--', alpha=0.4)
+        ax.grid(True, linestyle='--', alpha=0.4)
         ax.legend(loc='upper right', fontsize=9)
         
     plt.tight_layout()
@@ -617,7 +617,7 @@ def plot_full_energy_summary(full_data_fft, full_data_un, Hext_range, base_path,
             ax.set_ylim(ymin, ymax)
             
         ax.set_xlim(xmax_padded, xmin_padded) # Keeps standard reversing sweep profile view orientation
-        ax.set_grid(True, linestyle='--', alpha=0.4)
+        ax.grid(True, linestyle='--', alpha=0.4)
         ax.legend(loc='upper right', fontsize=9)
         
     plt.tight_layout()
@@ -641,7 +641,7 @@ def plot_full_energy_summary(full_data_fft, full_data_un, Hext_range, base_path,
         ax_tot.set_ylim(min_v - (v_range * 0.05), max_v + (v_range * 0.05))
         
     ax_tot.set_xlim(xmax_padded, xmin_padded)
-    ax_tot.set_grid(True, linestyle='--', alpha=0.4)
+    ax_tot.grid(True, linestyle='--', alpha=0.4)
     ax_tot.legend(loc='upper right', fontsize=10)
     
     plt.tight_layout()
@@ -697,7 +697,7 @@ def plot_performance_summary(performance_fft, performance_un, Hext_range, base_p
             ax.set_ylim(ymin, ymax)
             
         ax.set_xlim(xmax_padded, xmin_padded) # Keeps standard reversing sweep profile view orientation
-        ax.set_grid(True, linestyle='--', alpha=0.4)
+        ax.grid(True, linestyle='--', alpha=0.4)
         ax.legend(loc='upper right', fontsize=9)
         
     plt.tight_layout()
