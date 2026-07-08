@@ -905,13 +905,13 @@ if __name__ == '__main__':
 
         # Append information for 
         performance_fft['iters'].append(itern1)
-        performance_fft['vortices'].append(vortex_count_fft.item())
+        performance_fft['vortices'].append(vortex_count_fft)
         performance_fft['mz'].append(hist_fft['mz'][-1])
         performance_fft['time'].append(time_elapsed_fft)
         performance_fft['total'].append(hist_fft['e_total'][-1])
         
         performance_un['iters'].append(itern2)
-        performance_un['vortices'].append(vortex_count_un.item())
+        performance_un['vortices'].append(vortex_count_un)
         performance_un['mz'].append(hist_un['mz'][-1])
         performance_un['time'].append(time_elapsed_un)
         performance_un['total'].append(hist_un['e_total'][-1])
