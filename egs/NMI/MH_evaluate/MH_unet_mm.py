@@ -103,7 +103,8 @@ def update_spin_fft(model, Hext, Hext_vec, cell_count, args):
         history['e_demag'].append(model.Energy_demag.item())
         history['e_excha'].append(model.Energy_excha.item())
         history['e_anis'].append(model.Energy_aniso.item() if hasattr(model, 'Energy_aniso') else 0.0)
-        history['e_zeeman'].append(model.Energy_zeeman.item())
+        history['e_zeeman'].append(model.Energy_exter.item())
+        history['e_total'].append(model.Energy.item())
 
         # Print iteration info
         if error <= args.error_min or itern % 1000 == 0:  # Adjust the frequency of printing as needed
@@ -155,6 +156,7 @@ def update_spin_unet(model, Hext, Hext_vec, cell_count, args):
         history['e_excha'].append(model.Energy_excha.item())
         history['e_anis'].append(model.Energy_aniso.item() if hasattr(model, 'Energy_aniso') else 0.0)
         history['e_zeeman'].append(model.Energy_zeeman.item())
+        history['e_total'].append(model.Energy.item())
         
         # fluctation error break condition
         if itern > 20000:
@@ -512,10 +514,10 @@ def plot_iteration_energy(hist_fft, hist_un, base_path, nloop, Hext_val, args, s
     global_xmax_padded = max(len(hist_fft['e_demag']), len(hist_un['e_demag'])) * 1.05
     
     plot_map = [
-        ('e_demag', 'Demagnetizing Energy ($E_{demag}$)', 'Energy [Normalized Units]', axs[0, 0]),
-        ('e_anis', 'Anisotropy Energy ($E_{anis}$)', 'Energy [Normalized Units]', axs[0, 1]),
-        ('e_excha', 'Exchange Energy ($E_{excha}$)', 'Energy [Normalized Units]', axs[1, 0]),
-        ('e_zeeman', 'Zeeman Energy ($E_{zeeman}$)', 'Energy [Normalized Units]', axs[1, 1])
+        ('e_demag', 'Demagnetizing Energy ($E_{demag}$)', 'Energy [Joules]', axs[0, 0]),
+        ('e_anis', 'Anisotropy Energy ($E_{anis}$)', 'Energy [Joules]', axs[0, 1]),
+        ('e_excha', 'Exchange Energy ($E_{excha}$)', 'Energy [Joules]', axs[1, 0]),
+        ('e_zeeman', 'Zeeman Energy ($E_{zeeman}$)', 'Energy [Joules]', axs[1, 1])
     ]
     
     for key, panel_title, y_label, ax in plot_map:
@@ -541,6 +543,31 @@ def plot_iteration_energy(hist_fft, hist_un, base_path, nloop, Hext_val, args, s
         
     plt.tight_layout()
     plt.savefig(os.path.join(iter_energy_folder, f'iteration_energy_loop_{nloop}.png'), dpi=150)
+    plt.close()
+
+    fig_tot, ax_tot = plt.subplots(figsize=(9, 6))
+    fig_tot.suptitle(title_text, fontsize=11, fontweight='bold')
+    
+    ax_tot.plot(hist_fft['e_total'], color='blue', lw=2.5, linestyle='-', label='FFT Solver Path')
+    ax_tot.plot(hist_un['e_total'], color='red', lw=2.5, linestyle='-', label='UNet Model Path')
+    
+    ax_tot.set_title('Total Effective Field Energy ($E_{total}$)', fontsize=12, fontweight='bold')
+    ax_tot.set_xlabel('Internal Solver Step (Iteration)', fontsize=11)
+    ax_tot.set_ylabel('Total Energy [Joules]', fontsize=11) 
+    
+    combined_tot = hist_fft['e_total'] + hist_un['e_total']
+    if len(combined_tot) > 0:
+        max_v, min_v = max(combined_tot), min(combined_tot)
+        v_range = max_v - min_v if max_v != min_v else 1.0
+        ax_tot.set_ylim(min_v - (v_range * 0.05), max_v + (v_range * 0.05))
+        
+    ax_tot.set_xlim(0, global_xmax_padded)
+    ax_tot.grid(True, linestyle='--', alpha=0.4)
+    ax_tot.legend(loc='upper right', fontsize=10)
+    
+    plt.tight_layout()
+    fig_tot.subplots_adjust(top=0.85)
+    plt.savefig(os.path.join(iter_energy_folder, f'iteration_total_energy_loop_{nloop}.png'), dpi=150)
     plt.close()
 
 def plot_full_energy_summary(full_data_fft, full_data_un, Hext_range, base_path, args, spin_split, rand_seed):
@@ -579,7 +606,7 @@ def plot_full_energy_summary(full_data_fft, full_data_un, Hext_range, base_path,
         
         ax.set_title(panel_title, fontsize=11, fontweight='bold')
         ax.set_xlabel('External Field $H_{ext}$ [Oe]', fontsize=10)
-        ax.set_ylabel('Total Energy [Normalized Units]', fontsize=10)
+        ax.set_ylabel('Energy [Joules]', fontsize=10)
         
         combined_vals = list(full_data_fft[key]) + list(full_data_un[key])
         if len(combined_vals) > 0:
@@ -595,6 +622,31 @@ def plot_full_energy_summary(full_data_fft, full_data_un, Hext_range, base_path,
         
     plt.tight_layout()
     plt.savefig(os.path.join(full_energy_folder, 'full_equilibrium_energy_summary.png'), dpi=200)
+    plt.close()
+
+    fig_tot, ax_tot = plt.subplots(figsize=(9, 6))
+    fig_tot.suptitle(f"Total System Energy Profile Across M-H Sweep\n{title_text}", fontsize=11, fontweight='bold')
+    
+    ax_tot.plot(Hext_range, full_data_fft['total'], color='blue', lw=2.5, linestyle='-', label='FFT Engine Profile')
+    ax_tot.plot(Hext_range, full_data_un['total'], color='red', lw=2.5, linestyle='-', label='UNet Model Profile')
+    
+    ax_tot.set_title('Equilibrium Total System Energy ($E_{total}$)', fontsize=12, fontweight='bold')
+    ax_tot.set_xlabel('External Field $H_{ext}$ [Oe]', fontsize=11)
+    ax_tot.set_ylabel('Total Energy [Joules]', fontsize=11) 
+    
+    combined_tot = list(full_data_fft['total']) + list(full_data_un['total'])
+    if len(combined_tot) > 0:
+        max_v, min_v = max(combined_tot), min(combined_tot)
+        v_range = max_v - min_v if max_v != min_v else 1.0
+        ax_tot.set_ylim(min_v - (v_range * 0.05), max_v + (v_range * 0.05))
+        
+    ax_tot.set_xlim(xmax_padded, xmin_padded)
+    ax_tot.set_grid(True, linestyle='--', alpha=0.4)
+    ax_tot.legend(loc='upper right', fontsize=10)
+    
+    plt.tight_layout()
+    fig_tot.subplots_adjust(top=0.85)
+    plt.savefig(os.path.join(full_energy_folder, 'macro_total_energy_summary.png'), dpi=200)
     plt.close()
 
 def plot_performance_summary(performance_fft, performance_un, Hext_range, base_path, args, spin_split, rand_seed):
@@ -820,8 +872,8 @@ if __name__ == '__main__':
     hd_mm_plot, hd_un_plot = [], []
     heff_mm_plot, heff_un_plot = [], []
     
-    full_energy_fft = {'demag': [], 'anis': [], 'excha': [], 'zeeman': []}
-    full_energy_un  = {'demag': [], 'anis': [], 'excha': [], 'zeeman': []}
+    full_energy_fft = {'demag': [], 'anis': [], 'excha': [], 'zeeman': [], 'total': []}
+    full_energy_un  = {'demag': [], 'anis': [], 'excha': [], 'zeeman': [], 'total': []}
     performance_fft = {'iters': [], 'vortices': [], 'mz': [], 'time': []}
     performance_un  = {'iters': [], 'vortices': [], 'mz': [], 'time': []}
 
@@ -856,11 +908,13 @@ if __name__ == '__main__':
         performance_fft['vortices'].append(vortex_count_fft.item())
         performance_fft['mz'].append(hist_fft['mz'][-1])
         performance_fft['time'].append(time_elapsed_fft)
+        performance_fft['total'].append(hist_fft['e_total'][-1])
         
         performance_un['iters'].append(itern2)
         performance_un['vortices'].append(vortex_count_un.item())
         performance_un['mz'].append(hist_un['mz'][-1])
         performance_un['time'].append(time_elapsed_un)
+        performance_un['total'].append(hist_un['e_total'][-1])
     
         # Extract final convergence values from the error logs
         final_err_fft = error1_rcd[-1] if len(error1_rcd) > 0 else 0.0
@@ -870,11 +924,15 @@ if __name__ == '__main__':
         full_energy_fft['anis'].append(hist_fft['e_anis'][-1])
         full_energy_fft['excha'].append(hist_fft['e_excha'][-1])
         full_energy_fft['zeeman'].append(hist_fft['e_zeeman'][-1])
+        full_energy_fft['total'].append(hist_fft['e_total'][-1])
+
         
         full_energy_un['demag'].append(hist_un['e_demag'][-1])
         full_energy_un['anis'].append(hist_un['e_anis'][-1])
         full_energy_un['excha'].append(hist_un['e_excha'][-1])
         full_energy_un['zeeman'].append(hist_un['e_zeeman'][-1])
+        full_energy_un['total'].append(hist_un['e_total'][-1])
+
 
         # get spin and Hd
         spin_mm = film1.Spin.detach().cpu().numpy()
