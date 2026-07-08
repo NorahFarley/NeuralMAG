@@ -94,17 +94,17 @@ def update_spin_fft(model, Hext, Hext_vec, cell_count, args):
 
         model.GetEnergy_detailed(Hext=Hext)
 
-        history['hd'].append(hd_mag)
-        history['ha'].append(ha_mag)
-        history['he'].append(he_mag)
-        history['heff'].append(heff_mag)
-        history['m'].append(m_proj)
-        history['mz'].append(mz_abs_avg)
-        history['e_demag'].append(model.Energy_demag.item())
-        history['e_excha'].append(model.Energy_excha.item())
-        history['e_anis'].append(model.Energy_aniso.item() if hasattr(model, 'Energy_aniso') else 0.0)
-        history['e_exter'].append(model.Energy_exter.item())
-        history['e_total'].append(model.Energy.item())
+        hist_fft['hd'].append(hd_mag)
+        hist_fft['ha'].append(ha_mag)
+        hist_fft['he'].append(he_mag)
+        hist_fft['heff'].append(heff_mag)
+        hist_fft['m'].append(m_proj)
+        hist_fft['mz'].append(mz_abs_avg)
+        hist_fft['e_demag'].append(model.Energy_demag.item())
+        hist_fft['e_excha'].append(model.Energy_excha.item())
+        hist_fft['e_anis'].append(model.Energy_aniso.item() if hasattr(model, 'Energy_aniso') else 0.0)
+        hist_fft['e_exter'].append(model.Energy_exter.item())
+        hist_fft['e_total'].append(model.Energy.item())
 
         # Print iteration info
         if error <= args.error_min or itern % 1000 == 0:  # Adjust the frequency of printing as needed
@@ -146,17 +146,17 @@ def update_spin_unet(model, Hext, Hext_vec, cell_count, args):
 
         model.GetEnergy_detailed(Hext=Hext)
 
-        history['hd'].append(hd_mag)
-        history['ha'].append(ha_mag)
-        history['he'].append(he_mag)
-        history['heff'].append(heff_mag)
-        history['m'].append(m_proj)
-        history['mz'].append(mz_abs_avg)
-        history['e_demag'].append(model.Energy_demag.item())
-        history['e_excha'].append(model.Energy_excha.item())
-        history['e_anis'].append(model.Energy_aniso.item() if hasattr(model, 'Energy_aniso') else 0.0)
-        history['e_exter'].append(model.Energy_exter.item())
-        history['e_total'].append(model.Energy.item())
+        hist_un['hd'].append(hd_mag)
+        hist_un['ha'].append(ha_mag)
+        hist_un['he'].append(he_mag)
+        hist_un['heff'].append(heff_mag)
+        hist_un['m'].append(m_proj)
+        hist_un['mz'].append(mz_abs_avg)
+        hist_un['e_demag'].append(model.Energy_demag.item())
+        hist_un['e_excha'].append(model.Energy_excha.item())
+        hist_un['e_anis'].append(model.Energy_aniso.item() if hasattr(model, 'Energy_aniso') else 0.0)
+        hist_un['e_exter'].append(model.Energy_exter.item())
+        hist_un['e_total'].append(model.Energy.item())
         
         # fluctation error break condition
         if itern > 20000:
