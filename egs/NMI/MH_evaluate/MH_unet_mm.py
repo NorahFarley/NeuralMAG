@@ -71,7 +71,7 @@ def update_spin_fft(model, Hext, Hext_vec, cell_count, args):
     error_rcd = np.array([])
     history = {
         'hd': [], 'ha': [], 'he': [], 'heff': [], 'm': [], 'mz': [],
-        'e_demag': [], 'e_excha': [], 'e_anis': [], 'e_zeeman': []
+        'e_demag': [], 'e_excha': [], 'e_anis': [], 'e_exter': [], 'e_total': []
     }
     h_vec_gpu = torch.tensor(Hext_vec, dtype=torch.float32, device=model.device)
 
@@ -103,7 +103,7 @@ def update_spin_fft(model, Hext, Hext_vec, cell_count, args):
         history['e_demag'].append(model.Energy_demag.item())
         history['e_excha'].append(model.Energy_excha.item())
         history['e_anis'].append(model.Energy_aniso.item() if hasattr(model, 'Energy_aniso') else 0.0)
-        history['e_zeeman'].append(model.Energy_exter.item())
+        history['e_exter'].append(model.Energy_exter.item())
         history['e_total'].append(model.Energy.item())
 
         # Print iteration info
@@ -124,7 +124,7 @@ def update_spin_unet(model, Hext, Hext_vec, cell_count, args):
     error_rcd = np.array([])
     history = {
         'hd': [], 'ha': [], 'he': [], 'heff': [], 'm': [], 'mz': [],
-        'e_demag': [], 'e_excha': [], 'e_anis': [], 'e_zeeman': []
+        'e_demag': [], 'e_excha': [], 'e_anis': [], 'e_exter': [], 'e_total': []
     }
     h_vec_gpu = torch.tensor(Hext_vec, dtype=torch.float32, device=model.device)
 
@@ -155,7 +155,7 @@ def update_spin_unet(model, Hext, Hext_vec, cell_count, args):
         history['e_demag'].append(model.Energy_demag.item())
         history['e_excha'].append(model.Energy_excha.item())
         history['e_anis'].append(model.Energy_aniso.item() if hasattr(model, 'Energy_aniso') else 0.0)
-        history['e_zeeman'].append(model.Energy_zeeman.item())
+        history['e_exter'].append(model.Energy_exter.item())
         history['e_total'].append(model.Energy.item())
         
         # fluctation error break condition
@@ -517,7 +517,7 @@ def plot_iteration_energy(hist_fft, hist_un, base_path, nloop, Hext_val, args, s
         ('e_demag', 'Demagnetizing Energy ($E_{demag}$)', 'Energy [Joules]', axs[0, 0]),
         ('e_anis', 'Anisotropy Energy ($E_{anis}$)', 'Energy [Joules]', axs[0, 1]),
         ('e_excha', 'Exchange Energy ($E_{excha}$)', 'Energy [Joules]', axs[1, 0]),
-        ('e_zeeman', 'Zeeman Energy ($E_{zeeman}$)', 'Energy [Joules]', axs[1, 1])
+        ('e_exter', 'exter Energy ($E_{exter}$)', 'Energy [Joules]', axs[1, 1])
     ]
     
     for key, panel_title, y_label, ax in plot_map:
@@ -596,7 +596,7 @@ def plot_full_energy_summary(full_data_fft, full_data_un, Hext_range, base_path,
         ('demag', 'Equilibrium Demagnetizing Energy ($E_{demag}$)', axs[0, 0]),
         ('anis', 'Equilibrium Anisotropy Energy ($E_{anis}$)', axs[0, 1]),
         ('excha', 'Equilibrium Exchange Energy ($E_{excha}$)', axs[1, 0]),
-        ('zeeman', 'Equilibrium Zeeman Energy ($E_{zeeman}$)', axs[1, 1])
+        ('exter', 'Equilibrium exter Energy ($E_{exter}$)', axs[1, 1])
     ]
     
     for key, panel_title, ax in plot_map:
@@ -872,8 +872,8 @@ if __name__ == '__main__':
     hd_mm_plot, hd_un_plot = [], []
     heff_mm_plot, heff_un_plot = [], []
     
-    full_energy_fft = {'demag': [], 'anis': [], 'excha': [], 'zeeman': [], 'total': []}
-    full_energy_un  = {'demag': [], 'anis': [], 'excha': [], 'zeeman': [], 'total': []}
+    full_energy_fft = {'demag': [], 'anis': [], 'excha': [], 'exter': [], 'total': []}
+    full_energy_un  = {'demag': [], 'anis': [], 'excha': [], 'exter': [], 'total': []}
     performance_fft = {'iters': [], 'vortices': [], 'mz': [], 'time': []}
     performance_un  = {'iters': [], 'vortices': [], 'mz': [], 'time': []}
 
@@ -923,14 +923,14 @@ if __name__ == '__main__':
         full_energy_fft['demag'].append(hist_fft['e_demag'][-1])
         full_energy_fft['anis'].append(hist_fft['e_anis'][-1])
         full_energy_fft['excha'].append(hist_fft['e_excha'][-1])
-        full_energy_fft['zeeman'].append(hist_fft['e_zeeman'][-1])
+        full_energy_fft['exter'].append(hist_fft['e_exter'][-1])
         full_energy_fft['total'].append(hist_fft['e_total'][-1])
 
         
         full_energy_un['demag'].append(hist_un['e_demag'][-1])
         full_energy_un['anis'].append(hist_un['e_anis'][-1])
         full_energy_un['excha'].append(hist_un['e_excha'][-1])
-        full_energy_un['zeeman'].append(hist_un['e_zeeman'][-1])
+        full_energy_un['exter'].append(hist_un['e_exter'][-1])
         full_energy_un['total'].append(hist_un['e_total'][-1])
 
 
