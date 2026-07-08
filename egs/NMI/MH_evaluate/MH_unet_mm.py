@@ -69,7 +69,7 @@ def update_spin_fft(model, Hext, Hext_vec, cell_count, args):
     error = 1.0
     itern = 0
     error_rcd = np.array([])
-    history = {
+    hist_fft = {
         'hd': [], 'ha': [], 'he': [], 'heff': [], 'm': [], 'mz': [],
         'e_demag': [], 'e_excha': [], 'e_anis': [], 'e_exter': [], 'e_total': []
     }
@@ -122,7 +122,7 @@ def update_spin_unet(model, Hext, Hext_vec, cell_count, args):
     itern = 0
     error_fluc = 1.0
     error_rcd = np.array([])
-    history = {
+    hist_un = {
         'hd': [], 'ha': [], 'he': [], 'heff': [], 'm': [], 'mz': [],
         'e_demag': [], 'e_excha': [], 'e_anis': [], 'e_exter': [], 'e_total': []
     }
