@@ -450,14 +450,14 @@ def plot_iteration_winding_density(film1, film2, base_path, nloop, Hext_val, arg
     
     # Panel 1: FFT Ground Truth Topological Heatmap
     im0 = axs[0, 0].imshow(topo_fft, cmap='bwr', origin='lower', vmin=global_vmin, vmax=global_vmax)
-    axs[0, 0].set_title(f'FFT Solver Topological Charge Map\nTotal Absolute Vortices: {winding_abs_fft.item():.1f}', fontsize=11, fontweight='bold')
+    axs[0, 0].set_title(f'FFT Solver Topological Charge Map\nTotal Absolute Vortices: {winding_abs_fft:.1f}', fontsize=11, fontweight='bold')
     axs[0, 0].set_xlabel('x [nm]', fontsize=9)
     axs[0, 0].set_ylabel('y [nm]', fontsize=9)
     fig.colorbar(im0, ax=axs[0, 0], label='Local Topological Charge Density')
     
     # Panel 2: UNet Framework Topological Heatmap (Locked to identical bounds)
     im1 = axs[0, 1].imshow(topo_un, cmap='bwr', origin='lower', vmin=global_vmin, vmax=global_vmax)
-    axs[0, 1].set_title(f'UNet Model Topological Charge Map\nTotal Absolute Vortices: {winding_abs_un.item():.1f}', fontsize=11, fontweight='bold')
+    axs[0, 1].set_title(f'UNet Model Topological Charge Map\nTotal Absolute Vortices: {winding_abs_un:.1f}', fontsize=11, fontweight='bold')
     axs[0, 1].set_xlabel('x [nm]', fontsize=9)
     axs[0, 1].set_ylabel('y [nm]', fontsize=9)
     fig.colorbar(im1, ax=axs[0, 1], label='Local Topological Charge Density')
