@@ -908,13 +908,11 @@ if __name__ == '__main__':
         performance_fft['vortices'].append(vortex_count_fft)
         performance_fft['mz'].append(hist_fft['mz'][-1])
         performance_fft['time'].append(time_elapsed_fft)
-        performance_fft['total'].append(hist_fft['e_total'][-1])
         
         performance_un['iters'].append(itern2)
         performance_un['vortices'].append(vortex_count_un)
         performance_un['mz'].append(hist_un['mz'][-1])
         performance_un['time'].append(time_elapsed_un)
-        performance_un['total'].append(hist_un['e_total'][-1])
     
         # Extract final convergence values from the error logs
         final_err_fft = error1_rcd[-1] if len(error1_rcd) > 0 else 0.0
