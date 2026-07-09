@@ -284,7 +284,7 @@ if __name__ == '__main__':
         torch.mps.manual_seed(0)    
     
     # Model, optimizer, and data loaders initialization
-    model = f"../ckpt/{args.model}"
+    model = f"../ckpt/k{args.kc}/{args.model}"
     optim = optimizer.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=0.0001)
 
     # #load data
