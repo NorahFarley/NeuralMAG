@@ -73,8 +73,7 @@ MAG2305.load_model(model)
 # M-H loop calculation #
 ########################
 path0 = f"./{args.path}/data_problem1/"
-if not os.path.exists(path0):
-    os.mkdir(path0)
+os.makedirs(path0, exist_ok=True)
 
 print('\nBegin spin updating:\n')
 
