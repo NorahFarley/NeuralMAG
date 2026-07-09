@@ -20,9 +20,18 @@ Created on Tue May 16 20:00:00 2023
 import numpy as np
 import time, os
 import torch
+import argparse
 
 import libs.MAG2305 as MAG2305
 from libs.Unet import UNet
+
+# arguments
+parser = argparse.ArgumentParser(description="Script to process a model and path.")
+parser.add_argument("--model", type=str, required=True, help="Name or path of the model")
+parser.add_argument("--path", type=str, required=True, help="Directory path to use")
+args = parser.parse_args()
+print(f"Selected model: {args.model}")
+print(f"Selected path: {args.path}")
 
 ###############################
 # Prepare NeuralMAG2305 model #
@@ -55,7 +64,7 @@ device = torch.device("cuda:0")
 inch = size[2]*3
 
 model = UNet(kc=krn, inc=inch, ouc=inch).eval().to(device)
-ckpt = '../ckpt/k{}/model.pt'.format(krn)
+ckpt = f'../ckpt/k{krn}/{args.model}'
 model.load_state_dict(torch.load(ckpt, map_location=device))
 MAG2305.load_model(model)
 
@@ -63,7 +72,7 @@ MAG2305.load_model(model)
 ########################
 # M-H loop calculation #
 ########################
-path0 = "./data_problem1/"
+path0 = f"./{args.path}/data_problem1/"
 if not os.path.exists(path0):
     os.mkdir(path0)
 
@@ -165,7 +174,7 @@ plot_data(path=path0, mh_name='MHx_data-unetHd', spin_name='Mrx_spin-unetHd', pl
 # Plot with benchmark #
 #######################
 # Benchmark data
-path = "./benchmark/"
+path = f"./{args.path}/benchmark/"
 data_name1 = "problem-1-mo96a-data.txt"
 data_name2 = "problem-1-pb97a-data.txt"
 data_name3 = "problem-1-ts96b-data.txt"

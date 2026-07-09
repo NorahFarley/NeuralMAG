@@ -43,6 +43,9 @@ def get_args():
     parser.add_argument('--damping',    type=float,     default=0.02,      help='damping constatn (default: 0.02)')
     parser.add_argument('--dtime',      type=float,     default=1.0e-13,   help='real time step (default: 1.0e-13)')
     parser.add_argument('--converge',   type=bool,      default=False,     help='calculation to convergence (default: False)')
+    parser.add_argument("--model", type=str, required=True, help="Name or path of the model")
+    parser.add_argument("--path", type=str, required=True, help="Directory path to use")
+
 
     return parser.parse_args()
 
@@ -165,7 +168,7 @@ def run_relax(args, spin_relax=None):
 
 
 def run_llg(args, nnModel, method="fft"):
-    path0 = "./data_problem4/"
+    path0 = f"./{args.path}/data_problem4/"
     if not os.path.exists(path0):
         os.mkdir(path0)
 
@@ -221,13 +224,12 @@ if __name__ == "__main__":
     device = torch.device("cuda:0")
     inch = 6
 
+    args = get_args()
+
     model = UNet(kc=krn, inc=inch, ouc=inch).eval().to(device)
-    ckpt = '../ckpt/k{}/model.pt'.format(krn)
+    ckpt = f'../ckpt/k{krn}/{args.model}'
     model.load_state_dict(torch.load(ckpt, map_location=device))
     MAG2305.load_model(model)
-
-    # get args
-    args = get_args()
 
     # run test
     model0, spin_relax = run_relax(args=args)
