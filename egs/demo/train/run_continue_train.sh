@@ -4,7 +4,7 @@ loss_type='gradient'
 model='gradient_model_324.4.pt'
 
 
-python ./train.py --batch-size 100 \
+python -m continue_train.py --batch-size 100 \
                 --lr 0.005 \
                 --epochs 900 \
                 --kc 16 \
