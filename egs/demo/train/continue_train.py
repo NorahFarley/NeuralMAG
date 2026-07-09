@@ -11,6 +11,7 @@ from datetime import datetime
 import torch
 import torch.optim as optimizer
 
+from Unet import UNet
 from data_load import dataset_prepare
 from utils import *
 
@@ -259,7 +260,7 @@ if __name__ == '__main__':
     parser.add_argument('--dataug',     type=bool,  default=True,   help='data augmentation (default: False)')
     parser.add_argument('--alpha',      type=float, default=0.5,    help='weighting coefficient for weighted loss')
     parser.add_argument('--loss_type',  type=str,  default='baseline', help='loss weighting method')
-    parser.add_argument('--model',      type=str,                   help='existing model to continue training')
+    parser.add_argument('--model',      type=str,  default=None,     help='existing model to continue training')
     args = parser.parse_args()
 
     if torch.cuda.is_available():
@@ -284,7 +285,16 @@ if __name__ == '__main__':
         torch.mps.manual_seed(0)    
     
     # Model, optimizer, and data loaders initialization
-    model = f"../ckpt/k{args.kc}/{args.model}"
+    model = UNet(kc=args.kc, inc=args.inch, ouc=args.inch).to(device)
+    
+    if args.model is not None:
+        model_path = f"../ckpt/k{args.kc}/{args.model}"
+        print(f"Loading weights from existing checkpoint: {model_path}", flush=True)
+        # load_state_dict expects a dictionary of weights
+        checkpoint = torch.load(model_path, map_location=device)
+        model.load_state_dict(checkpoint)
+        print("Weights successfully loaded!", flush=True)
+
     optim = optimizer.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=0.0001)
 
     # #load data
