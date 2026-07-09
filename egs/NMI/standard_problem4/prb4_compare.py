@@ -169,8 +169,7 @@ def run_relax(args, spin_relax=None):
 
 def run_llg(args, nnModel, method="fft"):
     path0 = f"./{args.path}/data_problem4/"
-    if not os.path.exists(path0):
-        os.mkdir(path0)
+    os.makedirs(path0, exist_ok=True)
 
     cell_num = nnModel.model[nnModel.model>0].sum()
 
@@ -208,7 +207,7 @@ def run_llg(args, nnModel, method="fft"):
     file_name = "Mt_case1-{}_size{}".format(method, args.w)
     if args.converge:
         file_name += "_converge"
-    np.save(path0+file_name, MH_rcd)
+    np.save(os.path.join(path0, file_name), MH_rcd)
     plot_data(path=path0, data=MH_rcd, plt_name=file_name)
 
     return None

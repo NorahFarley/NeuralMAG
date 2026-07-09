@@ -88,10 +88,11 @@ path0 = f"./{args.path}/data_problem4/"
 os.makedirs(path0, exist_ok=True)
 for iax, size in enumerate([32, 64, 128, 512]):
     # NeuralMAG data
-    data_name = "Mt_case1-fft_size{}.npy".format(size)
-    data_fft = np.load(path0 + data_name)[::2]
-    data_name = "Mt_case1-unet_size{}.npy".format(size)
-    data_unet = np.load(path0 + data_name)[::2]
+    data_name_fft = "Mt_case1-fft_size{}.npy".format(size)
+    data_fft = np.load(os.path.join(path0, data_name_fft))[::2]
+
+    data_name_unet = "Mt_case1-unet_size{}.npy".format(size)
+    data_unet = np.load(os.path.join(path0, data_name_unet))[::2]
 
     data_for_plot = [ ["FFT/LLG", data_fft],
                       ["Unet/LLG",  data_unet] ]
@@ -100,25 +101,25 @@ for iax, size in enumerate([32, 64, 128, 512]):
 
     if size >= 512:
         # Benchmark data case1
-        path = "./benchmark/"
+        benchmark_path = "./benchmark/"
         name = "problem-4-Donahue_case1.txt"
         data_Donahue = np.array([[],[]])
-        f = open(path + name, mode='r')
-        for n, line in enumerate(f):
-            # if n >= 5:
-            if n >= 5 and n%4==0:
-                h = float(line.split()[-1]) / 1.0e-9
-                m = float(line.split()[-4])
-                data_Donahue = np.append( data_Donahue, [[h],[m]], axis=1 )
+        with open(os.path.join(benchmark_path, name), mode='r') as f:
+            for n, line in enumerate(f):
+                # if n >= 5:
+                if n >= 5 and n%4==0:
+                    h = float(line.split()[-1]) / 1.0e-9
+                    m = float(line.split()[-4])
+                    data_Donahue = np.append( data_Donahue, [[h],[m]], axis=1 )
 
         name = "problem-4-Rasmus_case1.txt"
         data_Rasmus = np.array([[],[]])
-        f = open(path + name, mode='r')
-        for n, line in enumerate(f):
-            if n >= 1:
-                h = float(line.split()[0]) / 1.0e-9
-                m = float(line.split()[2])
-                data_Rasmus = np.append( data_Rasmus, [[h],[m]], axis=1 )
+        with open(os.path.join(benchmark_path, name), mode='r') as f:
+            for n, line in enumerate(f):
+                if n >= 1:
+                    h = float(line.split()[0]) / 1.0e-9
+                    m = float(line.split()[2])
+                    data_Rasmus = np.append( data_Rasmus, [[h],[m]], axis=1 )
 
         data_for_plot.extend( [["Donahue", data_Donahue],
                                ["Rasmus",  data_Rasmus]] )
@@ -130,10 +131,10 @@ for iax, size in enumerate([32, 64, 128, 512]):
                    title=title, fig=fig, iax=iax)
 
 # plot converge
-data_name = "Mt_case1-fft_size512_converge.npy"
-data_fft = np.load(path0 + data_name)[::2]
-data_name = "Mt_case1-unet_size512_converge.npy"
-data_unet = np.load(path0 + data_name)[::2]
+data_name_fft_conv = "Mt_case1-fft_size512_converge.npy"
+data_fft = np.load(os.path.join(path0, data_name_fft_conv))[::2]
+data_name_unet_conv = "Mt_case1-unet_size512_converge.npy"
+data_unet = np.load(os.path.join(path0, data_name_unet_conv))[::2]
 
 data_for_plot = [ ["FFT/LLG", data_fft],
                   ["Unet/LLG",  data_unet] ]
@@ -146,5 +147,5 @@ plot_benchmark(data_list=data_for_plot,
 # save figure
 plt.tight_layout()
 plot_name="Mt_case1_benchmark.jpg"
-plt.savefig(plot_name, format="JPG")
+plt.savefig(os.path.join(path0, plot_name), format="JPG")
 plt.close()

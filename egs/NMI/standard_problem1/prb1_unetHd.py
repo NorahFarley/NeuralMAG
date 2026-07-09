@@ -109,8 +109,8 @@ print('\nEnd M-H calculation. Time cost: {:.1f}s\n'
       .format(time_finish-time_start) )
 
 # Save data
-np.save(path0+'MHx_data-unetHd', MH_rcd)
-np.save(path0+'Mrx_spin-unetHd', spin_Mr)
+np.save(os.path.join(path0, 'MHx_data-unetHd'), MH_rcd)
+np.save(os.path.join(path0, 'Mrx_spin-unetHd'), spin_Mr)
 
 
 ##################################
@@ -197,7 +197,7 @@ for i, name in enumerate([data_name1, data_name2, data_name3]):
 
 # NeuralMAG data
 path = path0
-data_mag = np.load(path + "MHx_data-unetHd.npy")
+data_mag = np.load(os.path.join(path, "MHx_data-unetHd.npy"))
 
 # Plot
 fig = plt.figure(figsize=(7,6))
@@ -217,4 +217,4 @@ ax.set_title(r"$\mu MAG$ Problem#1 Test")
 ax.legend()
 ax.set_aspect( data_mag[0][0], adjustable='box')
 
-plt.savefig(path + "MH_vs_benchmark-unetHd")
+plt.savefig(os.path.join(path0, "MH_vs_benchmark-unetHd"))
