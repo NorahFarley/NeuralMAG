@@ -7,6 +7,7 @@ Created on Mon Jul 01 17:00:00 2024
 import numpy as np
 import matplotlib.pyplot as plt
 import argparse
+import os
 
 # arguments
 parser = argparse.ArgumentParser(description="Script to process a model and path.")
@@ -84,6 +85,7 @@ def plot_benchmark(data_list, title, fig, iax):
 # Plot with benchmark #
 #######################
 path0 = f"./{args.path}/data_problem4/"
+os.makedirs(path0, exist_ok=True)
 for iax, size in enumerate([32, 64, 128, 512]):
     # NeuralMAG data
     data_name = "Mt_case1-fft_size{}.npy".format(size)
