@@ -4,7 +4,7 @@ import torch
 import random
 import numpy as np
 from tqdm import tqdm
-from .utils import *
+from utils import *
 
 def get_case_paths(paths):
     spin_paths = []
