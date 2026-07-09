@@ -98,7 +98,7 @@ for iax, size in enumerate([32, 64, 128, 512]):
 
     if size >= 512:
         # Benchmark data case1
-        path = f"./{args.path}/benchmark/"
+        path = "./benchmark/"
         name = "problem-4-Donahue_case1.txt"
         data_Donahue = np.array([[],[]])
         f = open(path + name, mode='r')

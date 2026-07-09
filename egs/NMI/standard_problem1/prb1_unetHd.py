@@ -173,7 +173,7 @@ plot_data(path=path0, mh_name='MHx_data-unetHd', spin_name='Mrx_spin-unetHd', pl
 # Plot with benchmark #
 #######################
 # Benchmark data
-path = f"./{args.path}/benchmark/"
+path = "./benchmark/"
 data_name1 = "problem-1-mo96a-data.txt"
 data_name2 = "problem-1-pb97a-data.txt"
 data_name3 = "problem-1-ts96b-data.txt"
