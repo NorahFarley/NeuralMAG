@@ -4,7 +4,7 @@ import torch
 import random
 import numpy as np
 from tqdm import tqdm
-from utils import *
+from .utils import *
 
 def get_case_paths(paths):
     spin_paths = []
@@ -103,23 +103,18 @@ def dataset_prepare(data_paths, ntest, n128, ntrain, cn, mode=None):
         return test_dataset
     else:
         print_memory("Before getdata")
-        print("Loading training data...", flush=True)
+        print("Loading training dataset...", flush=True)
         X_train, Y_train, X_test, Y_test = getdata(data_paths, ntest, n128, ntrain, cn)
-        print("Finished getdata()", flush=True)
+        print(f"Dataset loading complete for: {data_paths}", flush=True)
         print(X_train.shape, Y_train.shape, flush=True)
         print_memory("After getdata")
         #prepare training set
         X_train_tensor = torch.from_numpy(X_train).float()
-        print("Finished converting X_train to tensor", flush=True)
         y_train_tensor = torch.from_numpy(Y_train).float()
-        print("Finished converting Y_train to tensor", flush=True)
-        print("Loading testing data...", flush=True)
         train_dataset  = torch.utils.data.TensorDataset(X_train_tensor, y_train_tensor)
         #prepare test set
         X_test_tensor = torch.from_numpy(X_test).float()
-        print("Finished converting X_test to tensor", flush=True)
         y_test_tensor = torch.from_numpy(Y_test).float()
-        print("Finished converting Y_test to tensor", flush=True)
         test_dataset  = torch.utils.data.TensorDataset(X_test_tensor, y_test_tensor)
         return train_dataset, test_dataset
 

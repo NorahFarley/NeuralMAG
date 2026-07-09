@@ -28,6 +28,9 @@ print('MAG2305 version: {:s}\n'.format(__version__))
 import torch
 import numpy as np
 import sys
+import time
+import struct
+
 
 
 # =============================================================================
