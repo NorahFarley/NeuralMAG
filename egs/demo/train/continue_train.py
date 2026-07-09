@@ -12,7 +12,7 @@ import torch
 import torch.optim as optimizer
 
 from data_load import dataset_prepare
-from .utils import *
+from utils import *
 
 
 def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_dataloader3):
