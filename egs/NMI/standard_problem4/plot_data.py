@@ -6,6 +6,15 @@ Created on Mon Jul 01 17:00:00 2024
 
 import numpy as np
 import matplotlib.pyplot as plt
+import argparse
+
+# arguments
+parser = argparse.ArgumentParser(description="Script to process a model and path.")
+parser.add_argument("--model", type=str, required=True, help="Name or path of the model")
+parser.add_argument("--path", type=str, required=True, help="Directory path to use")
+args = parser.parse_args()
+print(f"Selected model: {args.model}")
+print(f"Selected path: {args.path}")
 
 # Font size
 parameters = {'axes.labelsize' : 13,
@@ -74,7 +83,7 @@ def plot_benchmark(data_list, title, fig, iax):
 #######################
 # Plot with benchmark #
 #######################
-path0 = "./data_problem4/"
+path0 = f"./{args.path}/data_problem4/"
 for iax, size in enumerate([32, 64, 128, 512]):
     # NeuralMAG data
     data_name = "Mt_case1-fft_size{}.npy".format(size)
@@ -89,7 +98,7 @@ for iax, size in enumerate([32, 64, 128, 512]):
 
     if size >= 512:
         # Benchmark data case1
-        path = "./benchmark/"
+        path = f"./{args.path}/benchmark/"
         name = "problem-4-Donahue_case1.txt"
         data_Donahue = np.array([[],[]])
         f = open(path + name, mode='r')
