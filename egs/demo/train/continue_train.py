@@ -410,7 +410,7 @@ if __name__ == '__main__':
         loss_test_list4.append(loss_test4)
 
         #model save path
-        model_path = os.path.join(ex_path, "/ckpt/")
+        model_path = os.path.join(ex_path, "ckpt")
         os.makedirs(model_path, exist_ok=True)
 
         #save best model checkpoint
@@ -433,7 +433,7 @@ if __name__ == '__main__':
         plt.xlabel('epoch')
         plt.ylabel('loss-log')
         plt.yscale('log')  # set y-axis scale to logarithmic
-        plt.savefig(os.path.join(ex_path, '/loss_ex{}.png'.format(args.ex)))
+        plt.savefig(os.path.join(ex_path, f"loss_ex{args.ex}.png"))
 
     elapsed = time.time() - start_time
 
@@ -454,7 +454,7 @@ if __name__ == '__main__':
                        "best_validation_loss": best_loss,
                        "training_time_seconds": elapsed}
 
-    with open(os.path.join(ex_path, "/experiment.json"), "w") as f:
+    with open(os.path.join(ex_path, "experiment.json"), "w") as f:
         json.dump(experiment_info, f, indent=4)  
 
     logging.info(f"Best epoch: {best_epoch}")
