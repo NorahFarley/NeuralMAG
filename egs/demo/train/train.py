@@ -12,7 +12,7 @@ import torch
 import torch.optim as optimizer
 
 from Unet import UNet
-from data_load import *
+from data_load import dataset_prepare
 from utils import *
 
 
@@ -27,12 +27,16 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
     Loss32 = AverageMeter()
     
     if args.dataug==True:
-        pbar = tqdm(total=round(1.1*len(train_dataloader1.dataset)))
+        total_steps = round(1.1*len(train_dataloader1.dataset))
     else:
-        pbar = tqdm(total=len(train_dataloader1.dataset))
+        total_steps = len(train_dataloader1.dataset)
     
+    pbar = tqdm(total=total_steps, 
+                bar_format='\r{desc}: {percentage:3.0f}%|{bar}| [{elapsed}<{remaining}, {rate_fmt}{postfix}]',
+                leave=True)
+
     #strat to train
-    for batch_idx, (batch1, batch2, batch3)  in enumerate(zip(train_dataloader1, train_dataloader2, train_dataloader3)):
+    for batch_idx, (batch1, batch2, batch3) in enumerate(zip(train_dataloader1, train_dataloader2, train_dataloader3)):
         x1, y1 = batch1
         x2, y2 = batch2
         x3, y3 = batch3
@@ -45,7 +49,12 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
 
         mask1, mask2, mask3 = create_mask(x1), create_mask(x2), create_mask(x3)
         
-        alpha = args.alpha
+        if epoch < 300:
+            alpha = 0.75
+        elif epoch < 600:
+            alpha = 1.0
+        else:
+            alpha = 1.25
 
         if args.loss_type == "baseline":
             weight1 = 1
@@ -67,17 +76,11 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
             wd2, _ = winding_density(x2)
             wd3, _ = winding_density(x3)   
 
-        elif args.loss_type == "exchange_energy": #exchange energy density
-            #Since all simulations use the same exchange stiffness, the constant 
-            # factor was absorbed into the weighting coefficient α.
+        elif args.loss_type == "exchange_energy": # exchange energy density
+            # All training datasets use same Ax:0.5e-6 so it is not included in loss function
             wd1 = gradient_magnitude(x1)**2 
             wd2 = gradient_magnitude(x2)**2
             wd3 = gradient_magnitude(x3)**2
-
-        # elif args.loss_type == "precision_torque":
-        #     wd1 = 'fill in later'
-        #     wd2 = 'fill in later'
-        #     wd3 = 'fill in later'
 
         else:
             raise ValueError(f"Unknown loss_type: {args.loss_type}")
@@ -90,82 +93,32 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
             weight1 = 1 + alpha * torch.abs(wd1)
             weight2 = 1 + alpha * torch.abs(wd2)
             weight3 = 1 + alpha * torch.abs(wd3)
-
-
     
             if epoch == 0 and batch_idx == 0:
-                print("\n========== Weight Statistics ==========")
-                print("32x32", flush=True)
-                print("min:", wd1.min().item())
-                print("max:", wd1.max().item())
-                print("mean:", wd1.mean().item())
-                print("std:", wd1.std().item())
+                wd_stats = {"32": {"min": wd1.min().item(),
+                                   "max": wd1.max().item(),
+                                   "mean": wd1.mean().item(),
+                                    "std": wd1.std().item(),
+                                    "abs_mean": torch.abs(wd1).mean().item(),
+                                    "abs_max": torch.abs(wd1).max().item(),
+                                    "p99": torch.quantile(torch.abs(wd1).flatten(),0.99).item()},
 
-                print("64x64", flush=True)
-                print("min:", wd2.min().item())
-                print("max:", wd2.max().item())
-                print("mean:", wd2.mean().item())
-                print("std:", wd2.std().item())
+                            "64": {"min": wd2.min().item(),
+                                    "max": wd2.max().item(),
+                                    "mean": wd2.mean().item(),
+                                    "std": wd2.std().item(),
+                                    "abs_mean": torch.abs(wd2).mean().item(),
+                                    "abs_max": torch.abs(wd2).max().item(),
+                                    "p99": torch.quantile(torch.abs(wd2).flatten(),0.99).item()},
 
-                print("96x96", flush=True)
-                print("min:", wd3.min().item())
-                print("max:", wd3.max().item())
-                print("mean:", wd3.mean().item())
-                print("std:", wd3.std().item())
-
-                wd_abs_32 = torch.abs(wd1)
-                wd_abs_64 = torch.abs(wd2)
-                wd_abs_96 = torch.abs(wd3)
-
-                print("max 32:", wd_abs_32.max().item())
-                print("min 32:", wd_abs_32.min().item())
-                print("abs mean 32:", wd_abs_32.mean().item())
-                print("abs std 32:", wd_abs_32.std().item())
-                print("99th percentile 32:", torch.quantile(wd_abs_32.flatten(), 0.99).item())
-
-                print("max 64:", wd_abs_64.max().item())
-                print("min 64:", wd_abs_64.min().item())
-                print("abs mean 64:", wd_abs_64.mean().item())
-                print("abs std 64:", wd_abs_64.std().item())
-                print("99th percentile 64:", torch.quantile(wd_abs_64.flatten(), 0.99).item())
-
-                print("max 96:", wd_abs_96.max().item())
-                print("min 96:", wd_abs_96.min().item())
-                print("abs mean 96:", wd_abs_96.mean().item())
-                print("abs std 96:", wd_abs_96.std().item())
-                print("99th percentile 96:", torch.quantile(wd_abs_96.flatten(), 0.99).item())
-
-                wd_stats = {
-                    "32": {
-                        "min": wd1.min().item(),
-                        "max": wd1.max().item(),
-                        "mean": wd1.mean().item(),
-                        "std": wd1.std().item(),
-                        "abs_mean": torch.abs(wd1).mean().item(),
-                        "abs_max": torch.abs(wd1).max().item(),
-                        "p99": torch.quantile(torch.abs(wd1).flatten(),0.99).item()
-                    },
-
-                    "64": {
-                        "min": wd2.min().item(),
-                        "max": wd2.max().item(),
-                        "mean": wd2.mean().item(),
-                        "std": wd2.std().item(),
-                        "abs_mean": torch.abs(wd2).mean().item(),
-                        "abs_max": torch.abs(wd2).max().item(),
-                        "p99": torch.quantile(torch.abs(wd2).flatten(),0.99).item()
-                    },
-
-                    "96": {
-                        "min": wd3.min().item(),
-                        "max": wd3.max().item(),
-                        "mean": wd3.mean().item(),
-                        "std": wd3.std().item(),
-                        "abs_mean": torch.abs(wd3).mean().item(),
-                        "abs_max": torch.abs(wd3).max().item(),
-                        "p99": torch.quantile(torch.abs(wd3).flatten(),0.99).item()
-                    }
-                }
+                            "96": {"min": wd3.min().item(),
+                                    "max": wd3.max().item(),
+                                    "mean": wd3.mean().item(),
+                                    "std": wd3.std().item(),
+                                    "abs_mean": torch.abs(wd3).mean().item(),
+                                    "abs_max": torch.abs(wd3).max().item(),
+                                    "p99": torch.quantile(torch.abs(wd3).flatten(),0.99).item()}
+                            }
 
                 file_path = os.path.join(ex_path, f"{args.loss_type}_stats.json")
 
@@ -210,11 +163,9 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
 
         pbar.update(x1.size(0))
         pbar.set_description('epoch {} Loss {:.1f} Loss1 {:.1f} / {:.3f} Loss2 {:.1f} / {:.3f} Loss3 {:.1f} / {:.3f}'.format(
-                               epoch, Loss.avg, Loss11.avg, Loss12.avg, Loss21.avg, Loss22.avg, Loss31.avg, Loss32.avg
-                                
-                               )
-                            )
+            epoch, Loss.avg, Loss11.avg, Loss12.avg, Loss21.avg, Loss22.avg, Loss31.avg, Loss32.avg))
     pbar.close()
+    print()
 
     #draw every 10 epoch
     if epoch > 0 and epoch % 10 == 0: 
@@ -233,7 +184,10 @@ def eval(epoch, model, dataloader1, dataloader2, dataloader3, dataloader4):
     Loss3 = AverageMeter()
     Loss4 = AverageMeter()
 
-    pbar = tqdm(total=len(dataloader1.dataset))
+    pbar = tqdm(total=len(dataloader1.dataset), 
+                bar_format='\r{desc}: {percentage:3.0f}%|{bar}| [{elapsed}<{remaining}, {rate_fmt}{postfix}]', 
+                leave=True)
+
     #strat to train
     for batch_idx, (batch1, batch2, batch3, batch4)  in enumerate(zip(dataloader1, dataloader2, dataloader3, dataloader4)):
         x1, y1 = batch1
@@ -270,11 +224,10 @@ def eval(epoch, model, dataloader1, dataloader2, dataloader3, dataloader4):
 
         pbar.update(x1.size(0))
         pbar.set_description('Eval: epoch {} Loss {:.1f} Loss1 {:.1f} Loss2 {:.1f}  Loss3 {:.1f} Loss4 {:.1f}'.format(
-                              epoch, Loss.avg, Loss1.avg, Loss2.avg, Loss3.avg, Loss4.avg
-                               )
-        )
+                              epoch, Loss.avg, Loss1.avg, Loss2.avg, Loss3.avg, Loss4.avg))
 
     pbar.close()
+    print()
     
     #draw every 10 epoch
     if epoch > 0 and epoch % 10 == 0: 
@@ -286,10 +239,7 @@ def eval(epoch, model, dataloader1, dataloader2, dataloader3, dataloader4):
     return Loss1.avg, Loss2.avg, Loss3.avg, Loss4.avg, Loss.avg
 
 
-
-
 if __name__ == '__main__':
-    print("Reached main()", flush=True)
 
     # Training settings
     parser = argparse.ArgumentParser(description='Unet micromagnetics')
@@ -308,15 +258,8 @@ if __name__ == '__main__':
     parser.add_argument('--dataug',     type=bool,  default=True,   help='data augmentation (default: False)')
     parser.add_argument('--alpha',      type=float, default=0.5,    help='weighting coefficient for weighted loss')
     parser.add_argument('--loss_type',  type=str,  default='baseline', help='loss weighting method')
+    parser.add_argument('--model',      type=str,  default=None,     help='existing model to continue training')
     args = parser.parse_args()
-
-    print("Parsed arguments", flush=True)
-
-    # #working env
-    # device = torch.device("cuda:{}".format(args.gpu))
-    # torch.manual_seed(0)
-    # torch.cuda.manual_seed(0) 
-    # torch.backends.cudnn.benchmark = True
 
     if torch.cuda.is_available():
         device = torch.device(f"cuda:{args.gpu}")
@@ -339,7 +282,6 @@ if __name__ == '__main__':
     elif device.type == "mps":
         torch.mps.manual_seed(0)    
     
-
     # Model, optimizer, and data loaders initialization
     model = UNet(kc=args.kc, inc=args.inch, ouc=args.inch).to(device)
     optim = optimizer.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=0.0001)
@@ -401,7 +343,7 @@ if __name__ == '__main__':
     train_dataloader2 = torch.utils.data.DataLoader(dataset=train_dataset2, batch_size=bsz2, shuffle=True,  num_workers=8, drop_last=False)
     train_dataloader3 = torch.utils.data.DataLoader(dataset=train_dataset3, batch_size=bsz3, shuffle=True,  num_workers=8, drop_last=False)
     
-    test_dataloader1  = torch.utils.data.DataLoader(dataset=test_dataset1,  batch_size=500, shuffle=True,  num_workers=8, drop_last=False) #changed batch size from 500 and num workers from 8 on all
+    test_dataloader1  = torch.utils.data.DataLoader(dataset=test_dataset1,  batch_size=500, shuffle=True,  num_workers=8, drop_last=False) 
     test_dataloader2  = torch.utils.data.DataLoader(dataset=test_dataset2,  batch_size=500, shuffle=True,  num_workers=8, drop_last=False)
     test_dataloader3  = torch.utils.data.DataLoader(dataset=test_dataset3,  batch_size=500, shuffle=True,  num_workers=8, drop_last=False)
     test_dataloader4  = torch.utils.data.DataLoader(dataset=test_dataset4,  batch_size=500, shuffle=True,  num_workers=8, drop_last=False)
@@ -409,22 +351,15 @@ if __name__ == '__main__':
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     #experiment path
-    ex_path = (
-    f"./{args.loss_type}_loss/"
-    f"{timestamp}_ex{args.ex}_alpha{args.alpha}"
-    f"_bsz{bsz1}_lr{args.lr}_Unet_kc{args.kc}_inch{args.inch}"
-    )
+    ex_path = os.path.join(f"./{args.loss_type}_contin",
+                           f"{timestamp}_ex{args.ex}_bsz{bsz1}_lr{args.lr}_Unet_kc{args.kc}_inch{args.inch}",)
     os.makedirs(ex_path, exist_ok=True)
 
     # Set up logging
     logging.basicConfig(filename=ex_path + '/training.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
     num_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(
-        p.numel()
-        for p in model.parameters()
-        if p.requires_grad
-    )
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
     logging.info(f"Total parameters: {num_params:,}")
     logging.info(f"Trainable parameters: {trainable_params:,}")
@@ -443,18 +378,17 @@ if __name__ == '__main__':
 
     start_time = time.time()
 
-    print("Creating model", flush=True)
-
     for epoch in range(args.epochs): 
         #train
         loss_train = train(epoch, model, optim,  train_dataloader1, train_dataloader2, train_dataloader3)
+        print_memory("After training")
+
         loss_train_list.append(loss_train)
         logging.info('epoch: {} loss: {:.2f}'.format(epoch, loss_train))
-
-        print('\n')
     
         #evaluate
         loss_test1, loss_test2, loss_test3, loss_test4, avg = eval(epoch, model, test_dataloader1, test_dataloader2, test_dataloader3, test_dataloader4)
+        print_memory("After evaluating")
         logging.info('Evaluate loss32: {:.1f} loss64: {:.1f} loss96: {:.1f} / loss128: {:.1f} avg: {:.1f}'
                     .format(loss_test1, loss_test2, loss_test3, loss_test4, avg))
         
@@ -465,7 +399,7 @@ if __name__ == '__main__':
         loss_test_list4.append(loss_test4)
 
         #model save path
-        model_path = ex_path + "/ckpt/"
+        model_path = os.path.join(ex_path, "/ckpt/")
         os.makedirs(model_path, exist_ok=True)
 
         #save best model checkpoint
@@ -476,7 +410,6 @@ if __name__ == '__main__':
             best_epoch = epoch
             best_model_state_dict = model.state_dict()
             torch.save(best_model_state_dict, f"{model_path}/best_model_{best_loss:.1f}.pt")
-
 
         # draw loss_train and loss_test
         plt.clf()
@@ -489,35 +422,32 @@ if __name__ == '__main__':
         plt.xlabel('epoch')
         plt.ylabel('loss-log')
         plt.yscale('log')  # set y-axis scale to logarithmic
-        plt.savefig(ex_path + '/loss_ex{}.png'.format(args.ex))
+        plt.savefig(os.path.join(ex_path, '/loss_ex{}.png'.format(args.ex)))
 
     elapsed = time.time() - start_time
 
-    experiment_info = {
-        "alpha": args.alpha,
-        "learning_rate": args.lr,
-        "batch_size_32": bsz1,
-        "batch_size_64": bsz2,
-        "batch_size_96": bsz3,
-        "epochs": args.epochs,
-        "kernel_channels": args.kc,
-        "input_channels": args.inch,
-        "optimizer": "Adam",
-        "betas": [0.9, 0.999],
-        "weight_decay": 1e-4,
-        "data_augmentation": args.dataug,
-        "seed": 0,
-        "best_epoch": best_epoch,
-        "best_validation_loss": best_loss,
-        "training_time_seconds": elapsed 
-    }
+    experiment_info = {"alpha": args.alpha,
+                       "learning_rate": args.lr,
+                       "batch_size_32": bsz1,
+                       "batch_size_64": bsz2,
+                       "batch_size_96": bsz3,
+                       "epochs": args.epochs,
+                       "kernel_channels": args.kc,
+                       "input_channels": args.inch,
+                       "optimizer": "Adam",
+                       "betas": [0.9, 0.999],
+                       "weight_decay": 1e-4,
+                       "data_augmentation": args.dataug,
+                       "seed": 0,
+                       "best_epoch": best_epoch,
+                       "best_validation_loss": best_loss,
+                       "training_time_seconds": elapsed}
 
-    with open(ex_path + "/experiment.json", "w") as f:
+    with open(os.path.join(ex_path, "/experiment.json"), "w") as f:
         json.dump(experiment_info, f, indent=4)  
 
     logging.info(f"Best epoch: {best_epoch}")
     logging.info(f"Best validation loss: {best_loss}")
-
     logging.info(f"Training time: {elapsed:.2f} seconds")
     logging.info(f"Training time: {elapsed/60:.2f} minutes")
     logging.info(json.dumps(experiment_info, indent=4))  
