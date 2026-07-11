@@ -120,9 +120,9 @@ def analyze_transition_peaks(time, trajectory_error, parameter, parameter_name="
 
     results = []
 
-    print("=" * 60)
-    print(f"Peak analysis for {parameter_name}")
-    print("=" * 60)
+    print("=" * 75)
+    print(f"Peak analysis for {parameter_name:^75}")
+    print("=" * 75)
 
     for i, group in enumerate(groups):
         peak = group[np.argmax(error[group])]
@@ -256,3 +256,85 @@ def compare_transition_predictors(time, trajectory_error, predictors, peak_thres
             print(csv_path)
 
     return results_df, summary_df
+
+
+def rank_transition_predictors(trajectory_error, predictor_dict, Hext_range, save_path, peak_count=2, max_lag=20):
+    """
+    Automatically ranks every transition predictor by correlation with
+    trajectory error.
+    """
+
+    out_dir = os.path.join(save_path, "transition_analysis")
+    os.makedirs(out_dir, exist_ok=True)
+
+    error = np.asarray(trajectory_error)
+
+    peak_indices = np.argpartition(error, -peak_count)[-peak_count:]
+    peak_indices = peak_indices[np.argsort(error[peak_indices])[::-1]]
+
+    results = []
+
+    for name, predictor in predictor_dict.items():
+        predictor = np.asarray(predictor)
+
+        r, p = pearsonr(error, predictor)
+
+        best_r = r
+        best_lag = 0
+
+        for lag in range(-max_lag, max_lag + 1):
+            if lag < 0:
+                rlag, _ = pearsonr(error[-lag:], predictor[:lag])
+            elif lag > 0:
+                rlag, _ = pearsonr(error[:-lag], predictor[lag:])
+            else:
+                rlag = r
+
+            if abs(rlag) > abs(best_r):
+                best_r = rlag
+                best_lag = lag
+
+        row = [name, r, abs(r), p, best_r, abs(best_r), best_lag]
+
+        # Add info for every peak
+        for idx in peak_indices:
+            row.append(Hext_range[idx])
+            row.append(error[idx])
+            row.append(predictor[idx])
+
+        # Distance from nearest local maximum
+        predictor_peak = np.argmax(predictor)
+        nearest = np.min(np.abs(peak_indices - predictor_peak))
+
+        row.append(predictor_peak)
+        row.append(nearest)
+        results.append(row)
+
+    # Sort automatically by usefulness
+    results.sort(key=lambda x: abs(x[5]), reverse=True)
+
+    csv_file = os.path.join(out_dir, "transition_predictor_ranking.csv")
+
+    header = ["Predictor", "Pearson r", "|Pearson|", "p-value", "Best Lag Correlation", "|Best Lag Corr|", "Best Lag"]
+
+    for i in range(peak_count):
+        header.extend([f"Peak {i+1} Hext", f"Peak {i+1} Error", f"Predictor at Peak {i+1}"])
+
+    header.extend(["Predictor Maximum Index", "Distance From Nearest Error Peak"])
+
+    with open(csv_file, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        writer.writerows(results)
+
+    print()
+    print(csv_file)
+
+    print()
+    print("Top Transition Predictors")
+    print("-------------------------")
+
+    for row in results[:10]:
+        print(f"{row[0]:30s}" f"  Lag Corr = {row[5]:.3f}" f"   Lag = {row[6]}")
+
+    return results

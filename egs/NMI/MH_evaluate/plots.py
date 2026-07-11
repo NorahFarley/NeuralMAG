@@ -13,6 +13,7 @@ import seaborn as sns
 import time
 from scipy.stats import linregress, pearsonr
 import csv
+import pandas as pd
 
 from libs.misc import Culist, MaskTp, spin_prepare, winding_density
 import libs.MAG2305 as MAG2305
@@ -761,7 +762,6 @@ def plot_ablation_comparison_table(ablation_results, base_path, args, spin_split
             "Std Error": float(np.std(err)),
         })
  
-    import pandas as pd
     table_df = pd.DataFrame(rows).sort_values("Total Accumulated Error").reset_index(drop=True)
  
     csv_path = os.path.join(folder, "ablation_comparison.csv")

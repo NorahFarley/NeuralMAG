@@ -15,7 +15,7 @@ import time
 import csv
 from scipy.stats import pearsonr
 
-from egs.NMI.MH_evaluate.searcher import analyze_transition_peaks, compare_transition_predictors, extract_candidate_predictors
+from egs.NMI.MH_evaluate.searcher import analyze_transition_peaks, compare_transition_predictors, extract_candidate_predictors, rank_transition_predictors
 from libs.misc import Culist, MaskTp, spin_prepare, winding_density
 import libs.MAG2305 as MAG2305
 from libs.Unet import UNet
@@ -316,7 +316,7 @@ def plot_transition_predictors(Hext_range, trajectory_error, save_path, predicto
         {"Hd Error": instantaneous_hd_mae,
         "Hex Error": hex_error_mae, 
         "Hanis Error": hanis_error_mae,
-        "Vortex Count": performance_fft["vortices"],
+        "Vortex Count": full_fft["vortices"],
         ...}
 
     peak_count : int, Number of largest trajectory-error peaks to mark.
@@ -402,89 +402,6 @@ def plot_transition_predictors(Hext_range, trajectory_error, save_path, predicto
     print("Transition predictor analysis saved.")
     print(csv_file)
 
-
-def rank_transition_predictors(trajectory_error, predictor_dict, Hext_range, save_path, peak_count=2, max_lag=20):
-    """
-    Automatically ranks every transition predictor by correlation with
-    trajectory error.
-    """
-
-    out_dir = os.path.join(save_path, "transition_analysis")
-    os.makedirs(out_dir, exist_ok=True)
-
-    error = np.asarray(trajectory_error)
-
-    peak_indices = np.argpartition(error, -peak_count)[-peak_count:]
-    peak_indices = peak_indices[np.argsort(error[peak_indices])[::-1]]
-
-    results = []
-
-    for name, predictor in predictor_dict.items():
-        predictor = np.asarray(predictor)
-
-        r, p = pearsonr(error, predictor)
-
-        best_r = r
-        best_lag = 0
-
-        for lag in range(-max_lag, max_lag + 1):
-            if lag < 0:
-                rlag, _ = pearsonr(error[-lag:], predictor[:lag])
-            elif lag > 0:
-                rlag, _ = pearsonr(error[:-lag], predictor[lag:])
-            else:
-                rlag = r
-
-            if abs(rlag) > abs(best_r):
-                best_r = rlag
-                best_lag = lag
-
-        row = [name, r, abs(r), p, best_r, abs(best_r), best_lag]
-
-        # Add info for every peak
-        for idx in peak_indices:
-            row.append(Hext_range[idx])
-            row.append(error[idx])
-            row.append(predictor[idx])
-
-        # Distance from nearest local maximum
-        predictor_peak = np.argmax(predictor)
-        nearest = np.min(np.abs(peak_indices - predictor_peak))
-
-        row.append(predictor_peak)
-        row.append(nearest)
-        results.append(row)
-
-    # Sort automatically by usefulness
-    results.sort(key=lambda x: abs(x[5]), reverse=True)
-
-    csv_file = os.path.join(out_dir, "transition_predictor_ranking.csv")
-
-    header = ["Predictor", "Pearson r", "|Pearson|", "p-value", "Best Lag Correlation", "|Best Lag Corr|", "Best Lag"]
-
-    for i in range(peak_count):
-        header.extend([f"Peak {i+1} Hext", f"Peak {i+1} Error", f"Predictor at Peak {i+1}"])
-
-    header.extend(["Predictor Maximum Index", "Distance From Nearest Error Peak"])
-
-    with open(csv_file, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(header)
-        writer.writerows(results)
-
-    print()
-    print("Transition predictor ranking saved.")
-    print(csv_file)
-
-    print()
-    print("Top Transition Predictors")
-    print("-------------------------")
-
-    for row in results[:10]:
-        print(f"{row[0]:30s}" f"  Lag Corr = {row[5]:.3f}" f"   Lag = {row[6]}")
-
-    return results
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='MH Test')
     parser.add_argument('--gpu',         type=int,    default=0,         help='GPU ID (default: 0)')
@@ -512,8 +429,6 @@ if __name__ == '__main__':
 
     # create two film models
     film1, film2 = initialize_models(args)
-
-    # initialize spin state
     spin_split, rand_seed, cell_count = prepare_spin_state(film1, film2, args)
     
     # create folder
@@ -537,18 +452,17 @@ if __name__ == '__main__':
     hd_mm_plot, hd_un_plot = [], []
     heff_mm_plot, heff_un_plot = [], []
     
-    full_energy_fft = {'demag': [], 'anis': [], 'excha': [], 'exter': [], 'total': []}
-    full_energy_un  = {'demag': [], 'anis': [], 'excha': [], 'exter': [], 'total': []}
-    performance_fft = {'iters': [], 'vortices': [], 'mz': [], 'time': []}
-    performance_un  = {'iters': [], 'vortices': [], 'mz': [], 'time': []}
-    full_torque_fft = {'tau_hd': [], 'tau_he': [], 'tau_ha': [], 'tau_heff': []}
-    full_torque_un  = {'tau_hd': [], 'tau_he': [], 'tau_ha': [], 'tau_heff': []}
+    full_fft = {'demag': [], 'anis': [], 'excha': [], 'exter': [], 'total': [], 
+                'tau_hd': [], 'tau_he': [], 'tau_ha': [], 'tau_heff': [], 
+                'iters': [], 'vortices': [], 'mz': [], 'time': []}
+    full_un = {'demag': [], 'anis': [], 'excha': [], 'exter': [], 'total': [], 
+               'tau_hd': [], 'tau_he': [], 'tau_ha': [], 'tau_heff': [], 
+               'iters': [], 'vortices': [], 'mz': [], 'time': []}
 
-    # Error accumulation tracking lists for fields and m
     hex_error_mae = []
     hanis_error_mae = []
     heff_error_mae = []
-    instantaneous_hd_mae = []   
+    hd_error_mae = []   
     trajectory_shift_mae = [] 
 
     # Main loop
@@ -567,91 +481,77 @@ if __name__ == '__main__':
         error2_rcd, itern2, hist_un = update_spin_unet(film2, Hext, Hext_vec, cell_count, args)
         time_elapsed_un = time.time() - start_un
 
+        # Extract final convergence values from the error logs
+        final_err_fft = error1_rcd[-1] if len(error1_rcd) > 0 else 0.0
+        final_err_un  = error2_rcd[-1] if len(error2_rcd) > 0 else 0.0
+
+        film1.GetEnergy_detailed(Hext=Hext)
+        film2.GetEnergy_detailed(Hext=Hext)
+
         # Extract topological counts using winding density 
         spin_fft_tensor = film1.Spin.permute(3, 0, 1, 2)[:, :, :, 0].unsqueeze(0)
         spin_un_tensor  = film2.Spin.permute(3, 0, 1, 2)[:, :, :, 0].unsqueeze(0)
         _, vortex_count_fft, _ = winding_density(spin_fft_tensor)
         _, vortex_count_un,  _ = winding_density(spin_un_tensor)
 
-        # Append information for 
-        performance_fft['iters'].append(itern1)
-        performance_fft['vortices'].append(vortex_count_fft)
-        performance_fft['mz'].append(hist_fft['mz'][-1])
-        performance_fft['time'].append(time_elapsed_fft)
-        
-        performance_un['iters'].append(itern2)
-        performance_un['vortices'].append(vortex_count_un)
-        performance_un['mz'].append(hist_un['mz'][-1])
-        performance_un['time'].append(time_elapsed_un)
-    
-        # Extract final convergence values from the error logs
-        final_err_fft = error1_rcd[-1] if len(error1_rcd) > 0 else 0.0
-        final_err_un  = error2_rcd[-1] if len(error2_rcd) > 0 else 0.0
+        full_fft['iters'].append(itern1)
+        full_fft['vortices'].append(vortex_count_fft)
+        full_fft['mz'].append(hist_fft['mz'][-1])
+        full_fft['time'].append(time_elapsed_fft)
+        full_un['iters'].append(itern2)
+        full_un['vortices'].append(vortex_count_un)
+        full_un['mz'].append(hist_un['mz'][-1])
+        full_un['time'].append(time_elapsed_un)
 
-        # model.GetEnergy_detailed(Hext=Hext)
+        full_fft['demag'].append(hist_fft['e_demag'][-1])
+        full_fft['anis'].append(hist_fft['e_anis'][-1])
+        full_fft['excha'].append(hist_fft['e_excha'][-1])
+        full_fft['exter'].append(hist_fft['e_exter'][-1])
+        full_fft['total'].append(hist_fft['e_total'][-1])
+        full_un['demag'].append(hist_un['e_demag'][-1])
+        full_un['anis'].append(hist_un['e_anis'][-1])
+        full_un['excha'].append(hist_un['e_excha'][-1])
+        full_un['exter'].append(hist_un['e_exter'][-1])
+        full_un['total'].append(hist_un['e_total'][-1])
 
-        full_energy_fft['demag'].append(hist_fft['e_demag'][-1])
-        full_energy_fft['anis'].append(hist_fft['e_anis'][-1])
-        full_energy_fft['excha'].append(hist_fft['e_excha'][-1])
-        full_energy_fft['exter'].append(hist_fft['e_exter'][-1])
-        full_energy_fft['total'].append(hist_fft['e_total'][-1])
-        full_energy_un['demag'].append(hist_un['e_demag'][-1])
-        full_energy_un['anis'].append(hist_un['e_anis'][-1])
-        full_energy_un['excha'].append(hist_un['e_excha'][-1])
-        full_energy_un['exter'].append(hist_un['e_exter'][-1])
-        full_energy_un['total'].append(hist_un['e_total'][-1])
-        
-        full_torque_fft['tau_hd'].append(hist_fft['tau_hd'][-1])
-        full_torque_fft['tau_he'].append(hist_fft['tau_he'][-1])
-        full_torque_fft['tau_ha'].append(hist_fft['tau_ha'][-1])
-        full_torque_fft['tau_heff'].append(hist_fft['tau_heff'][-1])
-        full_torque_un['tau_hd'].append(hist_un['tau_hd'][-1])
-        full_torque_un['tau_he'].append(hist_un['tau_he'][-1])
-        full_torque_un['tau_ha'].append(hist_un['tau_ha'][-1])
-        full_torque_un['tau_heff'].append(hist_un['tau_heff'][-1])
-
-        # get spin and Hd
-        spin_mm = film1.Spin.detach().cpu().numpy()
-        spin_un = film2.Spin.detach().cpu().numpy()
-        Hd_mm = film1.Hd.detach().cpu().numpy()
-        Hd_un = film2.Hd.detach().cpu().numpy()
-        Hex_mm = film1.He.detach().cpu().numpy()
-        Hex_un = film2.He.detach().cpu().numpy()
-        Hanis_mm = film1.Ha.detach().cpu().numpy()
-        Hanis_un = film2.Ha.detach().cpu().numpy()
-        Heff_mm = film1.Heff.detach().cpu().numpy()
-        Heff_un = film2.Heff.detach().cpu().numpy()
+        full_fft['tau_hd'].append(hist_fft['tau_hd'][-1])
+        full_fft['tau_he'].append(hist_fft['tau_he'][-1])
+        full_fft['tau_ha'].append(hist_fft['tau_ha'][-1])
+        full_fft['tau_heff'].append(hist_fft['tau_heff'][-1])
+        full_un['tau_hd'].append(hist_un['tau_hd'][-1])
+        full_un['tau_he'].append(hist_un['tau_he'][-1])
+        full_un['tau_ha'].append(hist_un['tau_ha'][-1])
+        full_un['tau_heff'].append(hist_un['tau_heff'][-1])
 
         # Calculate the spatial average magnitude across the grid sample
-        hex_mm_plot.append(np.mean(np.linalg.norm(Hex_mm, axis=-1)))
-        hex_un_plot.append(np.mean(np.linalg.norm(Hex_un, axis=-1)))
-        hanis_mm_plot.append(np.mean(np.linalg.norm(Hanis_mm, axis=-1)))
-        hanis_un_plot.append(np.mean(np.linalg.norm(Hanis_un, axis=-1)))
-        hd_mm_plot.append(np.mean(np.linalg.norm(Hd_mm, axis=-1)))      
-        hd_un_plot.append(np.mean(np.linalg.norm(Hd_un, axis=-1)))
-        heff_mm_plot.append(np.mean(np.linalg.norm(Heff_mm, axis=-1))) 
-        heff_un_plot.append(np.mean(np.linalg.norm(Heff_un, axis=-1)))
+        hex_mm_plot.append(np.mean(np.linalg.norm(film1.He.detach().cpu().numpy(), axis=-1)))
+        hanis_mm_plot.append(np.mean(np.linalg.norm(film1.Ha.detach().cpu().numpy(), axis=-1)))
+        hd_mm_plot.append(np.mean(np.linalg.norm(film1.Hd.detach().cpu().numpy(), axis=-1))) 
+        heff_mm_plot.append(np.mean(np.linalg.norm(film1.Heff.detach().cpu().numpy(), axis=-1))) 
+        hex_un_plot.append(np.mean(np.linalg.norm(film2.He.detach().cpu().numpy(), axis=-1)))
+        hanis_un_plot.append(np.mean(np.linalg.norm(film2.Ha.detach().cpu().numpy(), axis=-1)))             
+        hd_un_plot.append(np.mean(np.linalg.norm(film2.Hd.detach().cpu().numpy(), axis=-1)))       
+        heff_un_plot.append(np.mean(np.linalg.norm(film2.Heff.detach().cpu().numpy(), axis=-1)))
 
         # Calculate and record the Mean Absolute Error (MAE) between UNet and FFT fields
-        hex_error_mae.append(np.mean(np.abs(Hex_un - Hex_mm)))
-        hanis_error_mae.append(np.mean(np.abs(Hanis_un - Hanis_mm)))
-        heff_error_mae.append(np.mean(np.abs(Heff_un - Heff_mm)))
-
-        # Calculate and append tracking errors
-        hd_error = np.mean(np.abs(Hd_un - Hd_mm))
-        spin_error = np.mean(np.abs(spin_un - spin_mm))
-
-        instantaneous_hd_mae.append(hd_error)
-        trajectory_shift_mae.append(spin_error)
+        hex_error_mae.append(np.mean(np.abs(film2.He.detach().cpu().numpy() - film1.He.detach().cpu().numpy())))
+        hanis_error_mae.append(np.mean(np.abs(film2.Ha.detach().cpu().numpy() - film1.Ha.detach().cpu().numpy())))
+        heff_error_mae.append(np.mean(np.abs(film2.Heff.detach().cpu().numpy() - film1.Heff.detach().cpu().numpy())))
+        hd_error_mae.append(np.mean(np.abs(film2.Hd.detach().cpu().numpy() - film1.Hd.detach().cpu().numpy())))
+        trajectory_shift_mae.append(np.mean(np.abs(film2.Spin.detach().cpu().numpy() - film1.Spin.detach().cpu().numpy())))
         
         #MH loop data
         x_plot.append(Hext_val)
         y1_plot.append( np.dot(spin_mm.sum(axis=(0,1,2)), Hext_vec)/ cell_count )
         y2_plot.append( np.dot(spin_un.sum(axis=(0,1,2)), Hext_vec)/ cell_count )
 
+        title_text = (f"Film Layers: {args.layers} | Grid Size: {args.w}x{args.w} | Split: {spin_split} | Seed: {rand_seed} | Mask: {args.mask}\n"
+                  f"Material Properties ── $M_s$: {args.Ms} emu/cc | $A_x$: {args.Ax} pJ/m | $K_u$: {args.Ku} $J/m^3$\n"
+                  f"Loop: {nloop} | $H_{{ext}}$ = {Hext_val:.1f} Oe | Iterations: mm [{itern1}] | un [{itern2}] | Error: mm [{final_err_fft:.2e}] | un [{final_err_un:.2e}]\n ")
+
         # Plot results
         plot_results(spin_split, rand_seed, args, nloop, Hext_val, spin_mm, spin_un, itern1, itern2,
-                     Hd_mm, Hd_un, x_plot, y1_plot, y2_plot, Hext_range, error1_rcd, error2_rcd, filename)
+                     full_fft['demag'], full_un['demag'], x_plot, y1_plot, y2_plot, Hext_range, error1_rcd, error2_rcd, filename)
         plot_iteration_domain_walls(film1, film2, filename, nloop, Hext_val, args, spin_split, rand_seed, 
                                     itern1, itern2, final_err_fft, final_err_un)        
         plot_iteration_fields(hist_fft, hist_un, filename, nloop, Hext_val, args, spin_split, rand_seed, 
@@ -669,8 +569,7 @@ if __name__ == '__main__':
         np.save(filename + "Hext_array", x_plot)
         np.save(filename + "Mext_array_mm", y1_plot)
         np.save(filename + "Mext_array_un", y2_plot)
-
-        np.save(filename + "instantaneous_hd_mae", instantaneous_hd_mae)
+        np.save(filename + "instantaneous_hd_mae", hd_error_mae)
         np.save(filename + "trajectory_shift_mae", trajectory_shift_mae)
 
         # Save Mr
@@ -691,13 +590,14 @@ if __name__ == '__main__':
             np.save(filename + "Hc{}_spin_un".format(nloop-1), spin0_un)
             np.save(filename + "Hc{}_spin_un".format(nloop), spin_un)
 
-    plot_full_energy_summary(full_energy_fft, full_energy_un, Hext_range, filename, args, spin_split, rand_seed)
-    plot_performance_summary(performance_fft, performance_un, Hext_range, filename, args, spin_split, rand_seed)
-    plot_error_summary(Hext_range, instantaneous_hd_mae, trajectory_shift_mae, hex_error_mae, hanis_error_mae, 
+
+    plot_full_energy_summary(full_fft, full_un, Hext_range, filename, args, spin_split, rand_seed)
+    plot_performance_summary(full_fft, full_un, Hext_range, filename, args, spin_split, rand_seed)
+    plot_error_summary(Hext_range, hd_error_mae, trajectory_shift_mae, hex_error_mae, hanis_error_mae, 
                        filename, args, spin_split, rand_seed)
     plot_fields_summary(Hext_range, hex_mm_plot, hex_un_plot, hanis_mm_plot, hanis_un_plot, hd_mm_plot, hd_un_plot, 
                         heff_mm_plot, heff_un_plot, filename, args, spin_split, rand_seed)
-    plot_error_correlations(instantaneous_hd_mae, hex_error_mae, hanis_error_mae, trajectory_shift_mae,
+    plot_error_correlations(hd_error_mae, hex_error_mae, hanis_error_mae, trajectory_shift_mae,
                              filename, args, spin_split, rand_seed, Hext_range=Hext_range)
 
     # predictors2 = {"Vortex Count": vortex_count,
@@ -712,7 +612,7 @@ if __name__ == '__main__':
 
 #TODO: add mask to plot titles
 
-    predictors = {"Hd Error": instantaneous_hd_mae,
+    predictors = {"Hd Error": hd_error_mae,
                   "Hex Error": hex_error_mae,
                   "Hanis Error": hanis_error_mae,
                   "Heff Error": heff_error_mae,
@@ -720,19 +620,19 @@ if __name__ == '__main__':
                   "Hex Magnitude": hex_mm_plot,
                   "Hanis Magnitude": hanis_mm_plot,
                   "Heff Magnitude": heff_mm_plot,
-                  "Mz": performance_fft["mz"],
-                  "Vortex Count": performance_fft["vortices"],
-                  "Demag Energy": full_energy_fft["demag"],
-                  "Exchange Energy": full_energy_fft["excha"],
-                  "Anisotropy Energy": full_energy_fft["anis"]}
+                  "Mz": full_fft["mz"],
+                  "Vortex Count": full_fft["vortices"],
+                  "Demag Energy": full_fft["demag"],
+                  "Exchange Energy": full_fft["excha"],
+                  "Anisotropy Energy": full_fft["anis"]}
 
     candidate_predictors = extract_candidate_predictors(film1)
 
     rank_transition_predictors(trajectory_shift_mae, predictors, Hext_range, filename)
     plot_transition_predictors(Hext_range, trajectory_shift_mae, filename, predictors)
 
-    analyze_transition_peaks(Hext_range, trajectory_shift_mae, performance_fft["vortices"], parameter_name="Vortex Count")
-    analyze_transition_peaks(Hext_range, trajectory_shift_mae, full_energy_fft["excha"], parameter_name="Exchange Energy")
-    analyze_transition_peaks(Hext_range, trajectory_shift_mae, instantaneous_hd_mae, parameter_name="Hdemag Error")
+    analyze_transition_peaks(Hext_range, trajectory_shift_mae, full_fft["vortices"], parameter_name="Vortex Count")
+    analyze_transition_peaks(Hext_range, trajectory_shift_mae, full_fft["excha"], parameter_name="Exchange Energy")
+    analyze_transition_peaks(Hext_range, trajectory_shift_mae, hd_error_mae, parameter_name="Hdemag Error")
 
     compare_transition_predictors(Hext_range, trajectory_shift_mae, predictors, csv_path=filename, parameter_names=list(predictors.keys()))
