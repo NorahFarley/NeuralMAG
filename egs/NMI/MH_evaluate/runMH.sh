@@ -14,9 +14,7 @@
 #   chmod +x runMH_integrated_parts1_to_5.sh
 #   ./runMH_integrated_parts1_to_5.sh
 
-=======
 set -Eeuo pipefail
->>>>>>> 0d8fc4dbe4b4a67ec271aee8ee297b23ad2b2f0b
 
 # ---------------------------------------------------------------------------
 # Resolve paths robustly, independent of the directory from which this script
