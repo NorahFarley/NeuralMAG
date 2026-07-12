@@ -1,228 +1,131 @@
 # -*- coding: utf-8 -*-
 """
-Created on Tue Apr 04 10:00:00 2023
+NeuralMAG M-H evaluation with FFT-ground-truth transition analysis.
+
+The repository's original per-field ``plot_results`` diagnostic is retained.
+Expensive per-LLG-iteration physics-history plots are intentionally removed;
+all Parts 1-5 operate on one converged state per external-field value.
 """
 
-import os
-import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.colors import Normalize
-import matplotlib.colors as colors
+from __future__ import annotations
+
 import argparse
-import torch
-import seaborn as sns
+import os
 import time
-import csv
-from scipy.stats import pearsonr
-from collections import deque
+from pathlib import Path
+from typing import Any, Dict, Sequence, Tuple
+
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+from matplotlib.colors import Normalize
 
 from egs.NMI.MH_evaluate.searcher import (
+    CrossSweepAggregator,
+    LeadingIndicatorAnalyzer,
+    ManuscriptOutputGenerator,
     PhysicsRecorder,
-    detect_transition_events,
-    rank_leading_indicators,
-    plot_leading_indicators,
+    PublicationFigureGenerator,
+    TransitionAnalyzer,
+    analyze_winding_components,
 )
 from libs.misc import Culist, MaskTp, spin_prepare, winding_density
 import libs.MAG2305 as MAG2305
 from libs.Unet import UNet
-from plots import (plot_iteration_domain_walls, plot_iteration_fields, plot_iteration_panel, plot_iteration_winding_density, plot_iteration_energy, 
-                   plot_full_energy_summary, plot_performance_summary, plot_error_summary, plot_fields_summary, 
-                   plot_error_correlations, plot_iteration_torque, plot_iteration_alignment,
-                   plot_hd_error_vs_vortex_cores, plot_error_vs_transition_proximity, plot_colocalization_summary)
+from plots import (
+    plot_error_correlations,
+    plot_error_summary,
+    plot_error_vs_transition_proximity,
+    plot_fields_summary,
+    plot_full_energy_summary,
+    plot_performance_summary,
+)
 
 
 def load_unet_model(args):
     # load Unet Model
     model = UNet(kc=args.krn, inc=args.layers*3, ouc=args.layers*3).eval().to(device)
-    ckpt = '../ckpt/k{}/{}'.format(args.krn, args.model_name)
-    model.load_state_dict(torch.load(ckpt, map_location=device))
+    checkpoint = '../ckpt/k{}/{}'.format(args.krn, args.model_name)
+    if not checkpoint.is_file():
+        raise FileNotFoundError(f"UNet checkpoint was not found: {checkpoint.resolve()}")
+    state = torch.load(checkpoint, map_location=device)
+    model.load_state_dict(state)
     MAG2305.load_model(model)
-    print('Unet model loaded from {}'.format(ckpt))
+    print(f"UNet model loaded from {checkpoint}")
+    return checkpoint.resolve()
 
-def initialize_models(args):
-    #Initialize MAG2305 models.
-    film1 = MAG2305.mmModel(types='bulk', size=(args.w, args.w, args.layers), cell=(3,3,3), 
-                            Ms=args.Ms, Ax=args.Ax, Ku=args.Ku, Kvec=args.Kvec, 
-                            device="cuda:" + str(args.gpu))
-    
-    film2 = MAG2305.mmModel(types='bulk', size=(args.w, args.w, args.layers), cell=(3,3,3), 
-                            Ms=args.Ms, Ax=args.Ax, Ku=args.Ku, Kvec=args.Kvec, 
-                            device="cuda:" + str(args.gpu))
+def initialize_models(args: argparse.Namespace, device: torch.device):
+    common = dict(
+        types="bulk",
+        size=(args.w, args.w, args.layers),
+        cell=(args.cell_size, args.cell_size, args.cell_size),
+        Ms=args.Ms,
+        Ax=args.Ax,
+        Ku=args.Ku,
+        Kvec=args.Kvec,
+        device=str(device),
+    )
+    film_fft = MAG2305.mmModel(**common)
+    film_unet = MAG2305.mmModel(**common)
+    print(f"Creating {args.layers} layer models")
+    film_fft.DemagInit()
+    print("FFT demagnetization matrix initialized")
+    checkpoint = load_unet_model(args, device)
+    return film_fft, film_unet, checkpoint
 
-    print('Creating {} layer models \n'.format(args.layers))
-
-    # Initialize demag matrix
-    film1.DemagInit()
-    print('initializing demag matrix \n')
-
-    # load Unet Model
-    load_unet_model(args)
-
-    return film1, film2
-
-def prepare_spin_state(film1, film2, args):
+def prepare_spin_state(film1, film2, argsargs: argparse.Namespace):
     """
     Prepare the initial spin state.
     """
-    # spin_split = np.random.randint(low=2, high=32)
-    # rand_seed  = np.random.randint(low=1000, high=100000)
     spin_split = 8
     rand_seed  = 1234
     spin = spin_prepare(spin_split, film1, rand_seed, mask=args.mask)
     film1.SpinInit(spin)
     film2.SpinInit(spin)
     cell_count = (np.linalg.norm(spin, axis=-1) > 0).sum()
-    return spin_split, rand_seed, cell_count
+    return spin_split, cell_count
 
-def update_spin_fft(model, Hext, Hext_vec, cell_count, args):
+def update_spin_fft(model, Hext: np.ndarray, args: argparse.Namespace):
     """
-    Update the spin state of the model.
-    """
-    error = 1.0
-    itern = 0
-    error_rcd = np.array([])
-    hist_fft = {'hd': [], 'ha': [], 'he': [], 'heff': [], 'm': [], 'mz': [],
-                'tau_hd': [], 'tau_he': [], 'tau_ha': [], 'tau_heff': [],
-                'e_demag': [], 'e_excha': [], 'e_anis': [], 'e_exter': [], 'e_total': [], 
-                'align_hd': [], 'align_he': [], 'align_ha': [], 'align_heff': []}
-    
-    h_vec_gpu = torch.tensor(Hext_vec, dtype=torch.float32, device=model.device)
-
-
-    while itern < args.max_iter and error > args.error_min:
-        # FFT_Hd spin update
-        error = model.SpinLLG_RK4(Hext=Hext, dtime=args.dtime, damping=0.1)
-        error_rcd = np.append(error_rcd, error)
-        
-        # track the field magnitude at this iteration
-        # detached and sent to CPU as a single number, not an array
-        he_mag = torch.mean(torch.linalg.norm(model.He, dim=-1)).item()
-        ha_mag = torch.mean(torch.linalg.norm(model.Ha, dim=-1)).item()
-        hd_mag = torch.mean(torch.linalg.norm(model.Hd, dim=-1)).item()
-        heff_mag = torch.mean(torch.linalg.norm(model.Heff, dim=-1)).item()
-
-        spin_sum = torch.sum(model.Spin, dim=(0, 1, 2))
-        m_proj = torch.dot(spin_sum, h_vec_gpu).item() / cell_count
-        mz_abs_avg = torch.mean(torch.abs(model.Spin[..., 2])).item()
-
-        tau_hd = torch.mean(torch.linalg.norm(torch.cross(model.Spin, model.Hd, dim=-1), dim=-1)).item()
-        tau_he = torch.mean(torch.linalg.norm(torch.cross(model.Spin, model.He, dim=-1), dim=-1)).item()
-        tau_ha = torch.mean(torch.linalg.norm(torch.cross(model.Spin, model.Ha, dim=-1), dim=-1)).item()
-        tau_heff = torch.mean(torch.linalg.norm(torch.cross(model.Spin, model.Heff, dim=-1), dim=-1)).item()
-
-        eps = 1e-12
-
-        align_hd = torch.mean(torch.sum(model.Spin * model.Hd, dim=-1) / (torch.linalg.norm(model.Hd, dim=-1) + eps)).item()
-        align_he = torch.mean(torch.sum(model.Spin * model.He, dim=-1) / (torch.linalg.norm(model.He, dim=-1) + eps)).item()
-        align_ha = torch.mean(torch.sum(model.Spin * model.Ha, dim=-1) / (torch.linalg.norm(model.Ha, dim=-1) + eps)).item()
-        align_heff = torch.mean(torch.sum(model.Spin * model.Heff, dim=-1) / (torch.linalg.norm(model.Heff, dim=-1) + eps)).item()
-
-        #model.GetEnergy_detailed(Hext=Hext)
-        hist_fft['align_hd'].append(align_hd)
-        hist_fft['align_he'].append(align_he)
-        hist_fft['align_ha'].append(align_ha)
-        hist_fft['align_heff'].append(align_heff)
-        hist_fft['tau_hd'].append(tau_hd)
-        hist_fft['tau_he'].append(tau_he)
-        hist_fft['tau_ha'].append(tau_ha)
-        hist_fft['tau_heff'].append(tau_heff)
-        hist_fft['hd'].append(hd_mag)
-        hist_fft['ha'].append(ha_mag)
-        hist_fft['he'].append(he_mag)
-        hist_fft['heff'].append(heff_mag)
-        hist_fft['m'].append(m_proj)
-        hist_fft['mz'].append(mz_abs_avg)
-        # hist_fft['e_demag'].append(model.Energy_demag.item())
-        # hist_fft['e_excha'].append(model.Energy_excha.item())
-        # hist_fft['e_anis'].append(model.Energy_aniso.item() if hasattr(model, 'Energy_aniso') else 0.0)
-        # hist_fft['e_exter'].append(model.Energy_exter.item())
-        # hist_fft['e_total'].append(model.Energy.item())
-
-        # Print iteration info
-        if error <= args.error_min or itern % 1000 == 0:  # Adjust the frequency of printing as needed
-            print(f'Iteration: {itern} \n'
-                  f'Error_converge FFT: {error:.2e}')
-        itern += 1
-
-    return error_rcd, itern, hist_fft
-
-def update_spin_unet(model, Hext, Hext_vec, cell_count, args):
-    """
-    Update the spin state of the model.
+    Update the spin state of the FFT model and retain only the convergence-error trajectory.
     """
     error = 1.0
-    itern = 0
-    error_fluc = 1.0
-    error_rcd = np.array([])
-    hist_un = {'hd': [], 'ha': [], 'he': [], 'heff': [], 'm': [], 'mz': [],
-               'tau_hd': [], 'tau_he': [], 'tau_ha': [], 'tau_heff': [],
-               'e_demag': [], 'e_excha': [], 'e_anis': [], 'e_exter': [], 'e_total': [], 
-               'align_hd': [],'align_he': [],'align_ha': [],'align_heff': []}
-    
-    h_vec_gpu = torch.tensor(Hext_vec, dtype=torch.float32, device=model.device)
+    iteration = 0
+    error_record = []
+    while iteration < args.max_iter and error > args.error_min:
+        error = model.SpinLLG_RK4(Hext=Hext, dtime=args.dtime, damping=args.damping)
+        error_record.append(float(error))
+        if error <= args.error_min or iteration % 1000 == 0:
+            print(f"Iteration: {iteration}\nError_converge FFT: {error:.2e}")
+        iteration += 1
+    return np.asarray(error_record, dtype=float), iteration
 
-    while itern < args.max_iter and error > args.error_min:
-        # Unet_Hd spin update
-        error = model.SpinLLG_RK4_unetHd(Hext=Hext, dtime=args.dtime, damping=0.1)
-        error_rcd = np.append(error_rcd, error)
-
-        # track the field magnitude at this iteration
-        # detached and sent to CPU as a single number, not an array
-        he_mag = torch.mean(torch.linalg.norm(model.He, dim=-1)).item()
-        ha_mag = torch.mean(torch.linalg.norm(model.Ha, dim=-1)).item()
-        hd_mag = torch.mean(torch.linalg.norm(model.Hd, dim=-1)).item()
-        heff_mag = torch.mean(torch.linalg.norm(model.Heff, dim=-1)).item()
-
-        spin_sum = torch.sum(model.Spin, dim=(0, 1, 2))
-        m_proj = torch.dot(spin_sum, h_vec_gpu).item() / cell_count
-        mz_abs_avg = torch.mean(torch.abs(model.Spin[..., 2])).item()
-
-        tau_hd = torch.mean(torch.linalg.norm(torch.cross(model.Spin, model.Hd, dim=-1), dim=-1)).item()
-        tau_he = torch.mean(torch.linalg.norm(torch.cross(model.Spin, model.He, dim=-1), dim=-1)).item()
-        tau_ha = torch.mean(torch.linalg.norm(torch.cross(model.Spin, model.Ha, dim=-1), dim=-1)).item()
-        tau_heff = torch.mean(torch.linalg.norm(torch.cross(model.Spin, model.Heff, dim=-1), dim=-1)).item()
-
-        eps = 1e-12
-
-        align_hd = torch.mean(torch.sum(model.Spin * model.Hd, dim=-1) / (torch.linalg.norm(model.Hd, dim=-1) + eps)).item()
-        align_he = torch.mean(torch.sum(model.Spin * model.He, dim=-1) / (torch.linalg.norm(model.He, dim=-1) + eps)).item()
-        align_ha = torch.mean(torch.sum(model.Spin * model.Ha, dim=-1) / (torch.linalg.norm(model.Ha, dim=-1) + eps)).item()
-        align_heff = torch.mean(torch.sum(model.Spin * model.Heff, dim=-1) / (torch.linalg.norm(model.Heff, dim=-1) + eps)).item()
-
-        # model.GetEnergy_detailed(Hext=Hext)
-        hist_un['align_hd'].append(align_hd)
-        hist_un['align_he'].append(align_he)
-        hist_un['align_ha'].append(align_ha)
-        hist_un['align_heff'].append(align_heff)
-        hist_un['tau_hd'].append(tau_hd)
-        hist_un['tau_he'].append(tau_he)
-        hist_un['tau_ha'].append(tau_ha)
-        hist_un['tau_heff'].append(tau_heff)
-        hist_un['hd'].append(hd_mag)
-        hist_un['ha'].append(ha_mag)
-        hist_un['he'].append(he_mag)
-        hist_un['heff'].append(heff_mag)
-        hist_un['m'].append(m_proj)
-        hist_un['mz'].append(mz_abs_avg)
-        # hist_un['e_demag'].append(model.Energy_demag.item())
-        # hist_un['e_excha'].append(model.Energy_excha.item())
-        # hist_un['e_anis'].append(model.Energy_aniso.item() if hasattr(model, 'Energy_aniso') else 0.0)
-        # hist_un['e_exter'].append(model.Energy_exter.item())
-        # hist_un['e_total'].append(model.Energy.item())
-        
-        # fluctation error break condition
-        if itern > 20000:
-            error_fluc = np.abs(error_rcd[-2000:].mean() - error_rcd[-500:].mean()) / error_rcd[-2000:].mean()
-            if error_fluc < 0.02 and error < 1.0e-4:
-                print('Unet error not decreasing! Break.')
+def update_spin_unet(model, Hext: np.ndarray, args: argparse.Namespace):
+    """Relax the UNet-driven model and retain only convergence diagnostics."""
+    error = 1.0
+    iteration = 0
+    error_record = []
+    while iteration < args.max_iter and error > args.error_min:
+        error = model.SpinLLG_RK4_unetHd(Hext=Hext, dtime=args.dtime, damping=args.damping)
+        error_record.append(float(error))
+        if iteration > args.unet_stagnation_start and len(error_record) >= args.unet_stagnation_long_window:
+            long_mean = float(np.mean(error_record[-args.unet_stagnation_long_window:]))
+            short_mean = float(np.mean(error_record[-args.unet_stagnation_short_window:]))
+            fluctuation = abs(long_mean - short_mean) / max(abs(long_mean), 1.0e-30)
+            if fluctuation < args.unet_stagnation_fraction and error < args.unet_stagnation_error:
+                print("UNet convergence error has stagnated; ending this field relaxation.")
                 break
-        # Print iteration info
-        if error <= args.error_min or itern % 1000 == 0:  # Adjust the frequency of printing as needed
-            print(f'Iteration: {itern} \n'
-                  f'Error_converge UNet: {error:.2e}')
-        itern += 1
+        if error <= args.error_min or iteration % 1000 == 0:
+            print(f"Iteration: {iteration}\nError_converge UNet: {error:.2e}")
+        iteration += 1
+    return np.asarray(error_record, dtype=float), iteration
 
-    return error_rcd, itern, hist_un
+
+def _mean_field_magnitude(field: torch.Tensor, spin: torch.Tensor) -> float:
+    active = torch.linalg.vector_norm(spin, dim=-1) > 1.0e-12
+    magnitude = torch.linalg.vector_norm(field, dim=-1)
+    selected = magnitude[active]
+    return float(selected.mean().item()) if selected.numel() else float(magnitude.mean().item())
 
 
 def plot_results(nloop, spin_mm, spin_un, itern1, itern2, Hd_mm, Hd_un, x_plot, y1_plot, y2_plot, Hext_range, 
@@ -231,13 +134,8 @@ def plot_results(nloop, spin_mm, spin_un, itern1, itern2, Hd_mm, Hd_un, x_plot, 
     Plot and save the results.
     """
     fig, axs = plt.subplots(2, 4, figsize=(20, 10))
-    # title_text = (f"Film Layers: {args.layers} | Grid Size: {args.w}x{args.w} | Split: {spin_split} | Seed: {rand_seed} | Mask: {args.mask}\n"
-    #               f"Material Properties ── $M_s$: {args.Ms} emu/cc | $A_x$: {args.Ax} pJ/m | $K_u$: {args.Ku} $J/m^3$\n"
-    #               f"Loop: {nloop} | $H_{{ext}}$ = {Hext_val:.1f} Oe\n")
 
     fig.suptitle(general_title_iteration, fontsize=13, fontweight='bold')
-    # fig.suptitle('{} layers film size:{}_split{}_seed{}_Ms{}_Ax{}_Ku{}\n \nloop:{} , Hext={}'.format(args.layers, args.w, spin_split, 
-    # rand_seed, args.Ms, args.Ax, args.Ku, nloop, Hext), fontsize=18 )
     
     # Plot spin-mm RGB figures
     spin = (spin_mm + 1)/2
@@ -308,6 +206,74 @@ def plot_results(nloop, spin_mm, spin_un, itern1, itern2, Hd_mm, Hd_un, x_plot, 
     plt.savefig(os.path.join(save_path_iteration, f'loop_{nloop}.png'), dpi=300)
     plt.close()
 
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="NeuralMAG M-H evaluation and transition analysis")
+    parser.add_argument('--gpu', type=int, default=0)
+    parser.add_argument('--krn', type=int, default=16)
+    parser.add_argument('--w', type=int, default=32)
+    parser.add_argument('--layers', type=int, default=2)
+    parser.add_argument('--cell_size', type=float, default=3.0, help='Cubic cell size in nm')
+    parser.add_argument('--Ms', type=float, default=1000)
+    parser.add_argument('--Ax', type=float, default=0.5e-6)
+    parser.add_argument('--Ku', type=float, default=0.0)
+    parser.add_argument('--Kvec', type=Culist, default=(0, 0, 1))
+    parser.add_argument('--damping', type=float, default=0.1)
+    parser.add_argument('--dtime', type=float, default=1.0e-13)
+    parser.add_argument('--error_min', type=float, default=1.0e-5)
+    parser.add_argument('--max_iter', type=int, default=100000)
+    parser.add_argument('--mask', type=MaskTp, default=False)
+    parser.add_argument('--loss_type', type=str, default='baseline')
+    parser.add_argument('--model_name', type=str, default='model.pt')
+    parser.add_argument('--spin_split', type=int, default=8)
+    parser.add_argument('--rand_seed', type=int, default=1234)
+    parser.add_argument('--hext_start', type=float, default=1000.0)
+    parser.add_argument('--hext_end', type=float, default=-1000.0)
+    parser.add_argument('--hext_steps', type=int, default=201)
+    parser.add_argument('--field_angle_radians', type=float, default=0.01)
+
+    parser.add_argument('--unet_stagnation_start', type=int, default=20000)
+    parser.add_argument('--unet_stagnation_long_window', type=int, default=2000)
+    parser.add_argument('--unet_stagnation_short_window', type=int, default=500)
+    parser.add_argument('--unet_stagnation_fraction', type=float, default=0.02)
+    parser.add_argument('--unet_stagnation_error', type=float, default=1.0e-4)
+
+    parser.add_argument('--core_relative_threshold', type=float, default=0.25)
+    parser.add_argument('--core_absolute_threshold', type=float, default=0.02)
+    parser.add_argument('--core_min_cells', type=int, default=1)
+    parser.add_argument('--core_min_abs_charge', type=float, default=0.05)
+
+    parser.add_argument('--transition_merge_gap', type=int, default=1)
+    parser.add_argument('--transition_winding_tolerance', type=float, default=0.0)
+    parser.add_argument('--transition_m_z_threshold', type=float, default=3.0)
+    parser.add_argument('--transition_min_m_change', type=float, default=0.02)
+
+    parser.add_argument('--indicator_primary_window', type=int, default=10, choices=(3, 5, 10, 20))
+    parser.add_argument('--indicator_max_lag', type=int, default=20)
+    parser.add_argument('--indicator_lead_z_threshold', type=float, default=1.5)
+    parser.add_argument('--indicator_post_event_exclusion', type=int, default=3)
+    parser.add_argument('--indicator_permutations', type=int, default=500)
+    parser.add_argument('--indicator_bootstrap', type=int, default=500)
+    parser.add_argument('--indicator_top_n', type=int, default=12)
+    parser.add_argument('--indicator_random_seed', type=int, default=1234)
+
+    parser.add_argument('--publication_top_n', type=int, default=4)
+    parser.add_argument('--publication_pre_steps', type=int, default=20)
+    parser.add_argument('--publication_post_steps', type=int, default=10)
+    parser.add_argument('--publication_dpi', type=int, default=300)
+    parser.add_argument('--publication_formats', type=str, default='png,pdf')
+
+    parser.add_argument('--manuscript_top_n', type=int, default=10)
+    parser.add_argument('--manuscript_formats', type=str, default='csv,tex,md')
+    parser.add_argument('--run_label', type=str, default='')
+    parser.add_argument('--aggregate_root', type=str, default='')
+    parser.add_argument('--aggregate_output', type=str, default='')
+    parser.add_argument('--aggregate_min_runs', type=int, default=2)
+
+    parser.add_argument('--skip_original_plots', action='store_true')
+    parser.add_argument('--skip_summary_plots', action='store_true')
+    parser.add_argument('--skip_parts_2_to_5', action='store_true')
+    return parser
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='MH Test')
