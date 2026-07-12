@@ -69,13 +69,11 @@ def prepare_spin_state(film1, film2, args: argparse.Namespace):
     """
     Prepare the initial spin state.
     """
-    spin_split = 8
-    rand_seed  = 1234
-    spin = spin_prepare(spin_split, film1, rand_seed, mask=args.mask)
+    spin = spin_prepare(args.spin_split, film1, args.rand_seed, mask=args.mask)
     film1.SpinInit(spin)
     film2.SpinInit(spin)
     cell_count = (np.linalg.norm(spin, axis=-1) > 0).sum()
-    return spin_split, cell_count
+    return spin, cell_count
 
 def update_spin_fft(model, Hext: np.ndarray, args: argparse.Namespace):
     """
@@ -308,8 +306,8 @@ def main() -> None:
     full_fft: Dict[str, list] = {key: [] for key in ('demag', 'anis', 'excha', 'exter', 'total', 'iters', 'vortices', 'mz', 'time')}
     full_unet: Dict[str, list] = {key: [] for key in ('demag', 'anis', 'excha', 'exter', 'total', 'iters', 'vortices', 'mz', 'time')}
 
-    spin_mm = initial_spin.copy()
-    spin_un = initial_spin.copy()
+    spin_mm = film_fft.Spin.detach().cpu().numpy().copy()
+    spin_un = film_unet.Spin.detach().cpu().numpy().copy()
 
     general_title_summary = (f"Film Layers: {args.layers} | Grid Size: {args.w}x{args.w} | Split: {args.spin_split} | "
                              f"Seed: {args.rand_seed} | Mask: {args.mask}\n"
