@@ -4,8 +4,8 @@
 export PYTHONPATH=$(dirname $(dirname $(dirname $(pwd)))):$PYTHONPATH
 
 gpu=0
-model='model.pt'
-loss_type='baseline'
+model='exchange_energy_354.5.pt'
+loss_type='exchEnergy_density'
 
 for width in 64 96
 do
