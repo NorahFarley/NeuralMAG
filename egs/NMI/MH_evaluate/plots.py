@@ -14,18 +14,23 @@ import time
 from scipy.stats import linregress, pearsonr
 import csv
 import pandas as pd
+from scipy.stats import pearsonr
 
 from libs.misc import Culist, MaskTp, spin_prepare, winding_density
 import libs.MAG2305 as MAG2305
 from libs.Unet import UNet
 
-def plot_iteration_domain_walls(film1, film2, base_path, nloop, Hext_val, args, spin_split, rand_seed, itern1, itern2, err_fft, err_un):
+# ============================================================================
+# ITERATION PLOTS (TORQUE, ALIGNMENT, ENERGY, DOMAIN WALLS, WINDING DENSITY)
+# ============================================================================
+
+def plot_iteration_domain_walls(general_title_iteration, save_path_iteration, film1, film2, nloop):
     """
     Generates a 2x2 multi-panel spatial and quantitative analysis sheet comparing 
     domain wall layouts with locked color scales, 1D line cuts, and metadata.
     """
     # Automatically generates a separate, dedicated folder for this plot type
-    dw_folder = os.path.join(base_path, "domain_walls_spatial")
+    dw_folder = os.path.join(save_path_iteration, "domain_walls_spatial")
     os.makedirs(dw_folder, exist_ok=True)
     
     # Isolate domain wall profiles by computing local exchange field vector magnitudes (Layer 0)
@@ -40,10 +45,7 @@ def plot_iteration_domain_walls(film1, film2, base_path, nloop, Hext_val, args, 
     
     fig, axs = plt.subplots(2, 2, figsize=(15, 13))
     
-    title_text = (f"Film Layers: {args.layers} | Grid Size: {args.w}x{args.w} | Split: {spin_split} | Seed: {rand_seed} | Mask: {args.mask}\n"
-                  f"Material Properties ── $M_s$: {args.Ms} emu/cc | $A_x$: {args.Ax} pJ/m | $K_u$: {args.Ku} $J/m^3$\n")
-    
-    fig.suptitle("Domain Wall Position Graphs\n\n" + title_text, fontsize=13, fontweight="bold")
+    fig.suptitle("Domain Wall Position Graphs\n\n" + general_title_iteration, fontsize=13, fontweight="bold")
     
 
     # Find the global maximum exchange intensity between both models
@@ -93,28 +95,63 @@ def plot_iteration_domain_walls(film1, film2, base_path, nloop, Hext_val, args, 
     axs[1, 1].legend(loc='upper right', fontsize=9)
     
     plt.tight_layout()
-    plt.savefig(os.path.join(dw_folder, f'spatial_dw_loop_{nloop}.png'), dpi=150)
+    plt.savefig(os.path.join(save_path_iteration, f'spatial_dw_loop_{nloop}.png'), dpi=150)
     plt.close()
 
-def plot_iteration_fields(hist_fft, hist_un, base_path, nloop, Hext_val, args, 
-                         spin_split, rand_seed, itern1, itern2, err_fft, err_un):
+def plot_iteration_panel(hist_fft, hist_un, save_path_iteration, specific_title, general_title_iteration, panel_specs,
+                          nloop, plot_type):
+    """
+    Generic 2x2 iteration-trajectory panel plotter. Pass up to 4 panel_specs
+    to plot any subset of hist_fft/hist_un keys against each other.
+
+    panel_specs : list of up to 4 dicts, one per subplot, e.g.
+        [{'key': 'tau_hd', 'title': 'Demagnetizing Torque', 'ylabel': r'$|m \times H|$'},
+         {'key': 'tau_he', 'title': 'Exchange Torque',      'ylabel': r'$|m \times H|$', 'ylim': (-1.05, 1.05)}]
+        'ylim' is optional per-panel.
+    """
+    dw_folder = os.path.join(save_path_iteration, f"{plot_type}_plots")
+    os.makedirs(dw_folder, exist_ok=True)
+
+    if len(panel_specs) > 4:
+        raise ValueError("plot_iteration_panel supports at most 4 panels")
+
+    fig, axs = plt.subplots(2, 2, figsize=(14, 10))
+    axs_flat = axs.flatten()
+
+    fig.suptitle(specific_title + "\n\n" + general_title_iteration, fontsize=13, fontweight='bold')
+
+    for i, ax in enumerate(axs_flat):
+        if i >= len(panel_specs):
+            ax.axis('off')
+            continue
+        spec = panel_specs[i]
+        key = spec['key']
+        ax.plot(hist_fft[key], color='blue', lw=2, label='FFT')
+        ax.plot(hist_un[key], color='red', lw=2, label='UNet')
+        ax.set_title(spec.get('title', key), fontsize=11, fontweight='bold')
+        ax.set_xlabel('Iteration', fontsize=9)
+        ax.set_ylabel(spec.get('ylabel', key), fontsize=9)
+        if spec.get('ylim') is not None:
+            ax.set_ylim(*spec['ylim'])
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=9)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_path_iteration, f'{plot_type}_loop_{nloop}.png'), dpi=180)
+    plt.close()
+
+def plot_iteration_fields(general_title_iteration, hist_fft, hist_un, save_path_iteration, nloop):
     """
     Generates a 2x2 multi-panel line graph mapping every field variable 
     trajectory iteration-by-iteration for explicit path tracking.
     """
 
     # Create the dedicated subfolder
-    iter_folder = os.path.join(base_path, "iteration_error_plots")
+    iter_folder = os.path.join(save_path_iteration, "iteration_error_plots")
     os.makedirs(iter_folder, exist_ok=True)
     fig, axs = plt.subplots(3, 2, figsize=(15, 15))
     
-    title_text = (f"Film Layers: {args.layers} | Grid Size: {args.w}x{args.w} | Split: {spin_split} | Seed: {rand_seed} | Mask: {args.mask}\n"
-                  f"Material Properties ── $M_s$: {args.Ms} emu/cc | $A_x$: {args.Ax} pJ/m | $K_u$: {args.Ku} $J/m^3$\n"
-                  f"Target Threshold ($\Delta m_{{min}}$): {args.error_min:.2e}\n"
-                  f"FFT Steps: {itern1} (Final Err: {err_fft:.2e}) | UNet Steps: {itern2} (Final Err: {err_un:.2e})\n")
-    # fig.suptitle(title_text, fontsize=13, fontweight='bold')
-    # fig.suptitle(f'Field Component Convergence Trajectories | Hext = {Hext_val:.1f} Oe (Loop {nloop})', fontsize=14, fontweight='bold')
-    fig.suptitle("Field Component Convergence Trajectories\n\n"+ title_text, fontsize=13, fontweight="bold")
+    fig.suptitle("Field Component Convergence Trajectories\n\n"+ general_title_iteration, fontsize=13, fontweight="bold")
 
     # field axis scaling (Applies to Panels 1-4)
     all_field_values = (hist_fft['hd'] + hist_fft['ha'] + hist_fft['he'] + hist_fft['heff'] +
@@ -161,13 +198,13 @@ def plot_iteration_fields(hist_fft, hist_un, base_path, nloop, Hext_val, args,
     plt.savefig(os.path.join(iter_folder, f'iteration_trajectory_loop_{nloop}.png'), dpi=150)
     plt.close()
 
-def plot_iteration_winding_density(film1, film2, base_path, nloop, Hext_val, args, spin_split, rand_seed, itern1, itern2, err_fft, err_un):
+def plot_iteration_winding_density(general_title_iteration, film1, film2, save_path_iteration, nloop):
     """
     Generates a 2x2 multi-panel spatial and quantitative topological chart 
     comparing vortex core winding densities with symmetric scales.
     """
     # Create a dedicated separate subfolder for this plot classification
-    topo_folder = os.path.join(base_path, "winding_density_spatial")
+    topo_folder = os.path.join(save_path_iteration, "winding_density_spatial")
     os.makedirs(topo_folder, exist_ok=True)
 
     # Reshape spin arrays to channel-first format with batch dimension [1, 3, W, W] for layer 0
@@ -190,10 +227,7 @@ def plot_iteration_winding_density(film1, film2, base_path, nloop, Hext_val, arg
     
     fig, axs = plt.subplots(2, 2, figsize=(15, 13))
     
-    title_text = (f"Film Layers: {args.layers} | Grid Size: {args.w}x{args.w} | Split: {spin_split} | Seed: {rand_seed} | Mask: {args.mask}\n"
-                  f"Material Properties ── $M_s$: {args.Ms} emu/cc | $A_x$: {args.Ax} pJ/m | $K_u$: {args.Ku} $J/m^3$\n"
-                  f"Loop: {nloop} | $H_{{ext}}$ = {Hext_val:.1f} Oe | Target Threshold ($\Delta m_{{min}}$): {args.error_min:.2e}\n")
-    fig.suptitle(title_text, fontsize=13, fontweight='bold')
+    fig.suptitle("Winding Density Topological Analysis\n\n"+ general_title_iteration, fontsize=13, fontweight="bold")
     
     # Dynamically scales to the highest peak but keeps the bounds symmetrical around zero
     max_charge = max(np.max(np.abs(topo_fft)), np.max(np.abs(topo_un)))
@@ -249,20 +283,17 @@ def plot_iteration_winding_density(film1, film2, base_path, nloop, Hext_val, arg
     plt.savefig(os.path.join(topo_folder, f'spatial_topology_loop_{nloop}.png'), dpi=150)
     plt.close()
 
-def plot_iteration_energy(hist_fft, hist_un, base_path, nloop, Hext_val, args, spin_split, rand_seed, itern1, itern2, err_fft, err_un):
+def plot_iteration_energy(general_title_iteration, hist_fft, hist_un, save_path_iteration, nloop):
     """
     Generates a 2x2 multi-panel line graph mapping individual energy component 
     relaxation curves iteration-by-iteration with tailored 5% boundary padding.
     """
-    iter_energy_folder = os.path.join(base_path, "iteration_energy")
+    iter_energy_folder = os.path.join(save_path_iteration, "iteration_energy")
     os.makedirs(iter_energy_folder, exist_ok=True)
     
     fig, axs = plt.subplots(2, 2, figsize=(15, 11))
     
-    title_text = (f"Film Layers: {args.layers} | Grid Size: {args.w}x{args.w} | Split: {spin_split} | Seed: {rand_seed} | Mask: {args.mask}\n"
-                  f"Material Properties ── $M_s$: {args.Ms} emu/cc | $A_x$: {args.Ax} pJ/m | $K_u$: {args.Ku} $J/m^3$\n"
-                  f"Loop: {nloop} | $H_{{ext}}$ = {Hext_val:.1f} Oe | Target Threshold ($\Delta m_{{min}}$): {args.error_min:.2e}\n")
-    fig.suptitle(title_text, fontsize=13, fontweight='bold')
+    fig.suptitle("Energy Component Convergence Trajectories\n\n"+ general_title_iteration, fontsize=13, fontweight="bold")
     
     global_xmax_padded = max(len(hist_fft['e_demag']), len(hist_un['e_demag'])) * 1.05
     
@@ -297,7 +328,7 @@ def plot_iteration_energy(hist_fft, hist_un, base_path, nloop, Hext_val, args, s
     plt.close()
 
     fig_tot, ax_tot = plt.subplots(figsize=(9, 6))
-    fig_tot.suptitle(title_text, fontsize=11, fontweight='bold')
+    fig_tot.suptitle("Total Energy Convergence\n\n"+ general_title_iteration, fontsize=11, fontweight='bold')
     
     ax_tot.plot(hist_fft['e_total'], color='blue', lw=2.5, linestyle='-', label='FFT Solver Path')
     ax_tot.plot(hist_un['e_total'], color='red', lw=2.5, linestyle='-', label='UNet Model Path')
@@ -320,19 +351,95 @@ def plot_iteration_energy(hist_fft, hist_un, base_path, nloop, Hext_val, args, s
     plt.savefig(os.path.join(iter_energy_folder, f'iteration_total_energy_loop_{nloop}.png'), dpi=150)
     plt.close()
 
-def plot_full_energy_summary(full_data_fft, full_data_un, Hext_range, base_path, args, spin_split, rand_seed):
+
+def plot_iteration_torque(general_title_iteration, save_path_iteration, hist_fft, hist_un, nloop):
+    """
+    Plot evolution of the four torque magnitudes during relaxation.
+
+    Torque = |m x H|
+
+    These plots are often much more physically meaningful than the
+    field magnitudes because the LLG equation evolves according to
+    torque rather than field alone.
+    """
+
+    folder = os.path.join(save_path_iteration, "iteration_torques")
+    os.makedirs(folder, exist_ok=True)
+
+    fig, axs = plt.subplots(2,2, figsize=(14,10))
+
+    fig.suptitle("Torque Evolution During Relaxation\n\n"+ general_title_iteration, fontsize=13, fontweight="bold")
+
+    plots = [("tau_hd", "Demagnetizing Torque", axs[0,0]), 
+             ("tau_he", "Exchange Torque", axs[0,1]), 
+             ("tau_ha", "Anisotropy Torque", axs[1,0]), 
+             ("tau_heff", "Effective Torque", axs[1,1])]
+
+    for key, title, ax in plots:
+        ax.plot(hist_fft[key], color="blue", linewidth=2, label="FFT")
+        ax.plot(hist_un[key], color="red", linewidth=2, label="UNet")
+        ax.set_title(title, fontsize=11)
+        ax.set_xlabel("Iteration")
+        ax.set_ylabel(r"$|m \times H|$")
+        ax.grid(alpha=0.3)
+        ax.legend()
+
+    plt.tight_layout()
+    plt.savefig(
+        os.path.join(folder, f"torque_iteration_loop_{nloop}.png"), dpi=200)
+    plt.close()
+
+def plot_iteration_alignment(general_title_iteration, hist_fft, hist_un, save_path_iteration, nloop):
+    """
+    Mean alignment between magnetization and each internal field.
+
+    +1 = parallel
+     0 = perpendicular
+    -1 = antiparallel
+    """
+
+    folder = os.path.join(save_path_iteration, "iteration_alignment")
+    os.makedirs(folder, exist_ok=True)
+
+    fig, axs = plt.subplots(2,2, figsize=(14,10))
+
+    fig.suptitle("Alignment of Field Components During Relaxation\n\n"+ general_title_iteration, fontsize=13, fontweight="bold")
+
+    plot_map = [("align_hd", "Demagnetizing Field", axs[0,0]),
+                ("align_he", "Exchange Field", axs[0,1]),
+                ("align_ha", "Anisotropy Field", axs[1,0]),
+                ("align_heff", "Effective Field", axs[1,1])]
+
+    for key, title, ax in plot_map:
+        ax.plot(hist_fft[key], color="blue", lw=2, label="FFT")
+        ax.plot(hist_un[key], color="red", lw=2, label="UNet")
+        ax.set_title(title)
+        ax.set_xlabel("Iteration")
+        ax.set_ylabel(r"$\langle \cos(\theta)\rangle$")
+        ax.set_ylim(-1.05, 1.05)
+        ax.grid(alpha=0.3)
+        ax.legend()
+
+    plt.tight_layout()
+    plt.savefig(
+        os.path.join(folder, f"alignment_iteration_loop_{nloop}.png"), dpi=200)
+    plt.close()
+
+# =======================================================================
+# SUMMARY PLOTS (FINAL ENERGY PROFILES, PERFORMANCE METRICS, ETC.) 
+# =======================================================================
+
+def plot_full_energy_summary(general_title_summary, save_path_summary,full_data_fft, full_data_un, Hext_range):
     """
     Generates a final 2x2 multi-panel graph charting equilibrium energy components 
     across the entire completed external field sweep loop range.
     """
-    full_energy_folder = os.path.join(base_path, "summary_plots")
+    full_energy_folder = os.path.join(save_path_summary, "summary_plots")
     os.makedirs(full_energy_folder, exist_ok=True)
     
     fig, axs = plt.subplots(2, 2, figsize=(15, 11))
-    
-    title_text = (f"Film Layers: {args.layers} | Grid Size: {args.w}x{args.w} | Split: {spin_split} | Seed: {rand_seed} | Mask: {args.mask}\n"
-                  f"Material Properties ── $M_s$: {args.Ms} emu/cc | $A_x$: {args.Ax} pJ/m | $K_u$: {args.Ku} $J/m^3$\n")
-    fig.suptitle(title_text, fontsize=13, fontweight='bold')
+  
+    fig.suptitle("Full MH Curve Energy Summary\n\n"+ general_title_summary, fontsize=13, fontweight="bold")
     
     # Calculate uniform X-axis padding based on external field bounds
     max_h, min_h = max(Hext_range), min(Hext_range)
@@ -370,7 +477,7 @@ def plot_full_energy_summary(full_data_fft, full_data_un, Hext_range, base_path,
     plt.close()
 
     fig_tot, ax_tot = plt.subplots(figsize=(9, 6))
-    fig_tot.suptitle(f"Total System Energy Profile Across M-H Sweep\n{title_text}", fontsize=11, fontweight='bold')
+    fig_tot.suptitle(f"Total System Energy Profile Across M-H Sweep\n{general_title_summary}", fontsize=11, fontweight='bold')
     
     ax_tot.plot(Hext_range, full_data_fft['total'], color='blue', lw=2.5, linestyle='-', label='FFT Engine Profile')
     ax_tot.plot(Hext_range, full_data_un['total'], color='red', lw=2.5, linestyle='-', label='UNet Model Profile')
@@ -393,19 +500,17 @@ def plot_full_energy_summary(full_data_fft, full_data_un, Hext_range, base_path,
     plt.savefig(os.path.join(full_energy_folder, 'macro_total_energy_summary.png'), dpi=200)
     plt.close()
 
-def plot_performance_summary(performance_fft, performance_un, Hext_range, base_path, args, spin_split, rand_seed):
+def plot_performance_summary(general_title_summary, save_path_summary, performance_fft, performance_un, Hext_range):
     """
     Generates a final 2x2 multi-panel chart compiling global optimization metrics,
     topological structures, and execution times across the full Hext range.
     """
-    performance_folder = os.path.join(base_path, "summary_plots")
+    performance_folder = os.path.join(save_path_summary, "summary_plots")
     os.makedirs(performance_folder, exist_ok=True)
     
     fig, axs = plt.subplots(2, 2, figsize=(15, 11))
-    
-    title_text = (f"Film Layers: {args.layers} | Grid Size: {args.w}x{args.w} | Split: {spin_split} | Seed: {rand_seed} | Mask: {args.mask}\n"
-                  f"Material Properties ── $M_s$: {args.Ms} emu/cc | $A_x$: {args.Ax} pJ/m | $K_u$: {args.Ku} $J/m^3$\n")
-    fig.suptitle(title_text, fontsize=13, fontweight='bold')
+
+    fig.suptitle("Performance Summary\n\n" + general_title_summary, fontsize=13, fontweight='bold')
     
     # Calculate uniform X-axis bounds with  5% padding
     max_h, min_h = max(Hext_range), min(Hext_range)
@@ -443,20 +548,18 @@ def plot_performance_summary(performance_fft, performance_un, Hext_range, base_p
     plt.savefig(os.path.join(performance_folder, 'performance_summary.png'), dpi=200)
     plt.close()
 
-def plot_error_summary(Hext_range, inst_hd_mae, traj_shift_mae, hex_err_mae, hanis_err_mae, base_path, args, spin_split, rand_seed):
+def plot_error_summary(general_title_summary, save_path_summary, Hext_range, inst_hd_mae, traj_shift_mae, hex_err_mae, hanis_err_mae):
     """
     Generates a final 2x2 multi-panel master report compiling all local field approximations,
     historical path tracking drift, and intrinsic field deviations across the Hext sweep.
     """
-    error_summary_folder = os.path.join(base_path, "summary_plots")
+    error_summary_folder = os.path.join(save_path_summary, "summary_plots")
     os.makedirs(error_summary_folder, exist_ok=True)
     
     print("Generating comprehensive 4-panel error tracking analysis...")
     fig, axs = plt.subplots(2, 2, figsize=(15, 12))
     
-    title_text = (f"Film Layers: {args.layers} | Grid Size: {args.w}x{args.w} | Split: {spin_split} | Seed: {rand_seed} | Mask: {args.mask}\n"
-                  f"Material Properties ── $M_s$: {args.Ms} emu/cc | $A_x$: {args.Ax} pJ/m | $K_u$: {args.Ku} $J/m^3$\n")
-    fig.suptitle(title_text, fontsize=13, fontweight='bold')
+    fig.suptitle("Field Component Error Summary\n\n" + general_title_summary, fontsize=13, fontweight='bold')
     
     # Calculate uniform X-axis limits with standard 5% padding while maintaining the reversed sweep
     max_h, min_h = max(Hext_range), min(Hext_range)
@@ -491,20 +594,18 @@ def plot_error_summary(Hext_range, inst_hd_mae, traj_shift_mae, hex_err_mae, han
     plt.savefig(os.path.join(error_summary_folder, 'comprehensive_error_analysis.png'), dpi=300)
     plt.close()
 
-def plot_fields_summary(Hext_range, hex_mm, hex_un, hanis_mm, hanis_un, hd_mm, hd_un, heff_mm, heff_un, base_path, args, spin_split, rand_seed):
+def plot_fields_summary(general_title_summary, save_path_summary, Hext_range, hex_mm, hex_un, hanis_mm, hanis_un, hd_mm, hd_un, heff_mm, heff_un):
     """
     Generates a 2x2 panel graph chart recording equilibrium 
     magnitudes of all internal fields across the completed Hext sweep range.
     """
-    fields_summary_folder = os.path.join(base_path, "summary_plots")
+    fields_summary_folder = os.path.join(save_path_summary, "summary_plots")
     os.makedirs(fields_summary_folder, exist_ok=True)
     
     print("Generating final 4-panel physical field summary plot...")
     fig, axs = plt.subplots(2, 2, figsize=(15, 11))
-    
-    title_text = (f"Film Layers: {args.layers} | Grid Size: {args.w}x{args.w} | Split: {spin_split} | Seed: {rand_seed} | Mask: {args.mask}\n"
-                  f"Material Properties ── $M_s$: {args.Ms} emu/cc | $A_x$: {args.Ax} pJ/m | $K_u$: {args.Ku} $J/m^3$\n")
-    fig.suptitle(title_text, fontsize=13, fontweight='bold')
+
+    fig.suptitle("Field Component Over Full MH Curve Summary\n\n" + general_title_summary, fontsize=13, fontweight='bold')
     
     max_h, min_h = max(Hext_range), min(Hext_range)
     h_range = max_h - min_h if max_h != min_h else 1.0
@@ -542,16 +643,13 @@ def plot_fields_summary(Hext_range, hex_mm, hex_un, hanis_mm, hanis_un, hd_mm, h
     plt.savefig(os.path.join(fields_summary_folder, 'all_internal_fields_mh_sweep.png'), dpi=300)
     plt.close()
 
-def plot_error_correlations(hd_error, hex_error, hanis_error, traj_error, base_path, args, spin_split, rand_seed, Hext_range):
+def plot_error_correlations(general_title_summary, save_path_summary,hd_error, hex_error, hanis_error, traj_error, Hext_range):
     """
     Generates scatter plots comparing each internal field error to the
     trajectory error over the entire hysteresis sweep.
     """
-    fields_summary_folder = os.path.join(base_path, "summary_plots")
+    fields_summary_folder = os.path.join(save_path_summary, "summary_plots")
     os.makedirs(fields_summary_folder, exist_ok=True)
-        
-    title_text = (f"Layers: {args.layers} | Grid Size: {args.w}x{args.w} | Split: {spin_split} | Seed: {rand_seed} | Mask: {args.mask}\n"
-                  f"Material Properties ── $M_s$: {args.Ms} emu/cc | $A_x$: {args.Ax} pJ/m | $K_u$: {args.Ku} $J/m^3$\n")
 
     fig, axs = plt.subplots(1, 3, figsize=(16, 5.5), sharey=True, constrained_layout=True)
 
@@ -590,103 +688,20 @@ def plot_error_correlations(hd_error, hex_error, hanis_error, traj_error, base_p
         fig.colorbar(sc, ax=axs, label="$H_{ext}$ [Oe]", shrink=0.8)
 
     axs[0].set_ylabel("Trajectory Error")
-    fig.suptitle("Correlation Between Internal Field Errors and Trajectory Error\n\n" + title_text, 
-                 fontsize=13, fontweight='bold')
+    fig.suptitle("Correlation Between Internal Field Errors and Trajectory Error\n\n" + general_title_summary, fontsize=13, fontweight='bold')
 
     plt.savefig(os.path.join(fields_summary_folder, "error_correlations.png"), dpi=300, bbox_inches="tight")
     plt.close()
 
-def plot_iteration_torque(hist_fft, hist_un, base_path, nloop, Hext_val, args, spin_split, rand_seed, 
-                          itern1, itern2, err_fft, err_un):
-    """
-    Plot evolution of the four torque magnitudes during relaxation.
 
-    Torque = |m x H|
-
-    These plots are often much more physically meaningful than the
-    field magnitudes because the LLG equation evolves according to
-    torque rather than field alone.
-    """
-
-    folder = os.path.join(base_path, "iteration_torques")
-    os.makedirs(folder, exist_ok=True)
-
-    fig, axs = plt.subplots(2,2, figsize=(14,10))
-
-    title = (f"Torque Evolution During Relaxation\n\n"
-             f"Grid: {args.w}x{args.w} | Layers: {args.layers} | Split={spin_split} | Seed={rand_seed}\n"
-             f"Mask={args.mask} | Ms: {args.Ms} | Ax: {args.Ax} | Ku: {args.Ku}\n"
-             f"Hext={Hext_val:.1f} Oe")
-
-    fig.suptitle(title, fontsize=13, fontweight='bold')
-
-    plots = [("tau_hd", "Demagnetizing Torque", axs[0,0]), 
-             ("tau_he", "Exchange Torque", axs[0,1]), 
-             ("tau_ha", "Anisotropy Torque", axs[1,0]), 
-             ("tau_heff", "Effective Torque", axs[1,1])]
-
-    for key, title, ax in plots:
-        ax.plot(hist_fft[key], color="blue", linewidth=2, label="FFT")
-        ax.plot(hist_un[key], color="red", linewidth=2, label="UNet")
-        ax.set_title(title, fontsize=11)
-        ax.set_xlabel("Iteration")
-        ax.set_ylabel(r"$|m \times H|$")
-        ax.grid(alpha=0.3)
-        ax.legend()
-
-    plt.tight_layout()
-    plt.savefig(
-        os.path.join(folder, f"torque_iteration_loop_{nloop}.png"), dpi=200)
-    plt.close()
-
-def plot_iteration_alignment(hist_fft, hist_un, base_path, nloop, Hext_val, args, spin_split, 
-                             rand_seed, itern1, itern2, err_fft, err_un):
-    """
-    Mean alignment between magnetization and each internal field.
-
-    +1 = parallel
-     0 = perpendicular
-    -1 = antiparallel
-    """
-
-    folder = os.path.join(base_path, "iteration_alignment")
-    os.makedirs(folder, exist_ok=True)
-
-    fig, axs = plt.subplots(2,2, figsize=(14,10))
-
-    fig.suptitle(f"Field Alignment During Relaxation\n\n"
-                 f"Hext={Hext_val:.1f} Oe", fontsize=13, fontweight="bold")
-
-    plot_map = [("align_hd", "Demagnetizing Field", axs[0,0]),
-                ("align_he", "Exchange Field", axs[0,1]),
-                ("align_ha", "Anisotropy Field", axs[1,0]),
-                ("align_heff", "Effective Field", axs[1,1])]
-
-    for key, title, ax in plot_map:
-        ax.plot(hist_fft[key], color="blue", lw=2, label="FFT")
-        ax.plot(hist_un[key], color="red", lw=2, label="UNet")
-        ax.set_title(title)
-        ax.set_xlabel("Iteration")
-        ax.set_ylabel(r"$\langle \cos(\theta)\rangle$")
-        ax.set_ylim(-1.05, 1.05)
-        ax.grid(alpha=0.3)
-        ax.legend()
-
-    plt.tight_layout()
-    plt.savefig(
-        os.path.join(folder, f"alignment_iteration_loop_{nloop}.png"), dpi=200)
-    plt.close()
-
-
-def plot_error_vs_transition_proximity(trajectory_error, vortex_count, base_path, args, spin_split, rand_seed,
-                                        max_window=15, event_type='both'):
+def plot_error_vs_transition_proximity(general_title_summary, save_path_summary,trajectory_error, vortex_count, max_window=15, event_type='both'):
     """
     Bin trajectory error by "frames since nearest topological event"
     (vortex nucleation or annihilation, detected as a change in vortex
     count between consecutive Hext steps) and plot the resulting decay/
     rise curve.
     """
-    folder = os.path.join(base_path, "summary_plots")
+    folder = os.path.join(save_path_summary, "summary_plots")
     os.makedirs(folder, exist_ok=True)
  
     error = np.asarray(trajectory_error, dtype=float)
@@ -721,9 +736,7 @@ def plot_error_vs_transition_proximity(trajectory_error, vortex_count, base_path
  
     fig, ax = plt.subplots(figsize=(9, 6))
  
-    title_text = (f"Layers: {args.layers} | Grid: {args.w}x{args.w} | Split: {spin_split} | Seed: {rand_seed} | Mask: {args.mask}\n"
-                  f"Events aligned: {len(event_indices)} ({event_type})\n")
-    fig.suptitle("Trajectory Error Aligned to Topological Events\n\n" + title_text, fontsize=12, fontweight='bold')
+    fig.suptitle("Trajectory Error Aligned to Topological Events\n\n" + general_title_summary, fontsize=12, fontweight='bold')
  
     ax.plot(x, mean_curve, color='crimson', lw=2.5, label='Mean trajectory error')
     ax.fill_between(x, mean_curve - std_curve, mean_curve + std_curve, color='crimson', alpha=0.2, label='+/- 1 std')
@@ -742,7 +755,7 @@ def plot_error_vs_transition_proximity(trajectory_error, vortex_count, base_path
             'n_events': len(event_indices), 'event_indices': event_indices}
  
  
-def plot_ablation_comparison_table(ablation_results, base_path, args, spin_split, rand_seed):
+def plot_ablation_comparison_table(general_title_summary, ablation_results, base_path):
     """
     Creates a summary table (as a saved figure + CSV) comparing peak error
     and total accumulated error across different model variants, e.g.
@@ -770,8 +783,7 @@ def plot_ablation_comparison_table(ablation_results, base_path, args, spin_split
     fig, ax = plt.subplots(figsize=(10, 1.2 + 0.5 * len(table_df)))
     ax.axis('off')
  
-    title_text = (f"Layers: {args.layers} | Grid: {args.w}x{args.w} | Split: {spin_split} | Seed: {rand_seed} | Mask: {args.mask}")
-    ax.set_title("Model Variant Ablation Comparison\n" + title_text, fontsize=12, fontweight='bold', pad=20)
+    ax.set_title("Model Variant Ablation Comparison\n" + general_title_summary, fontsize=12, fontweight='bold', pad=20)
  
     display_df = table_df.copy()
     for col in ["Peak Error", "Mean Error", "Total Accumulated Error", "Std Error"]:
@@ -796,29 +808,8 @@ def plot_ablation_comparison_table(ablation_results, base_path, args, spin_split
  
     return table_df
  
- 
-def compute_temporal_hd_variance(hd_history_buffer):
-    """
-    Given a short history of the U-Net's own Hd predictions at this cell,
-    compute the per-cell variance across that history as a proxy for "the model
-    itself is uncertain here". 
 
-    Returns
-    -------
-    variance_map : ndarray, shape (W, W) or (W, W, D)
-        Per-cell variance of |Hd| across the k history steps.
-    mean_variance : float
-        Spatial mean of variance_map -- use this as a scalar predictor,
-        the same way instantaneous_hd_mae etc. are used in `predictors`.
-    """
-    hd_history_buffer = np.asarray(hd_history_buffer)
-    hd_mag_history = np.linalg.norm(hd_history_buffer, axis=-1)  # (k, W, W[, D])
-    variance_map = np.var(hd_mag_history, axis=0)
-    mean_variance = float(np.mean(variance_map))
-    return variance_map, mean_variance
-
-def plot_hd_error_vs_vortex_cores(film1, film2, base_path, nloop, Hext_val, args, spin_split, rand_seed,
-                                   itern1, itern2, err_fft, err_un, core_threshold=0.5):
+def plot_hd_error_vs_vortex_cores(general_title_summary, save_path_summary,film1, film2, nloop, core_threshold=0.5):
     """
     Overlay the spatial Hd (demag field) error map with the locations of
     vortex cores, identified from winding density. This directly tests
@@ -832,7 +823,7 @@ def plot_hd_error_vs_vortex_cores(film1, film2, base_path, nloop, Hext_val, args
         its local extremum, so 0.3-0.6 is a reasonable starting point;
         tune by eye against a few spatial_topology_loop_*.png plots first.
     """
-    folder = os.path.join(base_path, "hd_error_vs_cores")
+    folder = os.path.join(save_path_summary, "hd_error_vs_cores")
     os.makedirs(folder, exist_ok=True)
  
     Hd_mm = film1.Hd.detach().cpu().numpy()[:, :, 0, :]
@@ -847,10 +838,8 @@ def plot_hd_error_vs_vortex_cores(film1, film2, base_path, nloop, Hext_val, args
     core_ys, core_xs = np.where(core_mask)
  
     fig, ax = plt.subplots(figsize=(8, 7))
- 
-    title_text = (f"Film Layers: {args.layers} | Grid Size: {args.w}x{args.w} | Split: {spin_split} | Seed: {rand_seed} | Mask: {args.mask}\n"
-                  f"Loop: {nloop} | $H_{{ext}}$ = {Hext_val:.1f} Oe | Vortex cells (|winding|>{core_threshold}): {core_mask.sum()}\n")
-    fig.suptitle("Demag Field Error vs. Vortex Core Locations\n\n" + title_text, fontsize=12, fontweight='bold')
+
+    fig.suptitle("Demag Field Error vs. Vortex Core Locations\n\n" + general_title_summary, fontsize=12, fontweight='bold')
  
     im = ax.imshow(hd_error_map, cmap='hot', origin='lower')
     fig.colorbar(im, ax=ax, label='$|H_{demag,un} - H_{demag,mm}|$ [Oe]')
@@ -881,3 +870,97 @@ def plot_hd_error_vs_vortex_cores(film1, film2, base_path, nloop, Hext_val, args
             'mean_error_elsewhere': float(mean_error_elsewhere),
             'n_core_cells': int(core_mask.sum())}
 
+def plot_colocalization_summary(general_title_summary, save_path_summary, Hext_range, coloc_rcd):
+    """
+    Sweep-level view of plot_hd_error_vs_vortex_cores: mean Hd error at vortex
+    cores vs. elsewhere, as a function of Hext, to see whether spatial
+    co-localization strengthens near switching fields.
+    """
+    folder = os.path.join(save_path_summary, "summary_plots")
+    os.makedirs(folder, exist_ok=True)
+
+    at_cores = np.array([r['mean_error_at_cores'] for r in coloc_rcd])
+    elsewhere = np.array([r['mean_error_elsewhere'] for r in coloc_rcd])
+    n_cells = np.array([r['n_core_cells'] for r in coloc_rcd])
+
+    fig, axs = plt.subplots(2, 1, figsize=(11, 8), sharex=True)
+
+    axs[0].plot(Hext_range, at_cores, color='crimson', lw=2, label='Mean error at vortex cores')
+    axs[0].plot(Hext_range, elsewhere, color='steelblue', lw=2, label='Mean error elsewhere')
+    axs[0].set_ylabel('Mean $H_{demag}$ error [Oe]')
+    axs[0].legend(fontsize=9)
+    axs[0].grid(alpha=0.3)
+
+    axs[1].plot(Hext_range, n_cells, color='black', lw=1.5)
+    axs[1].set_ylabel('# vortex-core cells')
+    axs[1].set_xlabel('$H_{ext}$ [Oe]')
+    axs[1].grid(alpha=0.3)
+
+    fig.suptitle("Hd Error / Vortex-Core Co-localization Across Sweep\n" + general_title_summary, fontsize=12, fontweight='bold')
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(folder, "colocalization_summary.png"), dpi=250)
+    plt.close()
+
+
+def plot_temporal_variance_vs_error(general_title_summary, save_path_summary, Hext_range, temporal_var_rcd, trajectory_error):
+    """
+    Tests whether compute_temporal_hd_variance (a model-internal signal,
+    no ground truth needed) tracks actual trajectory error -- i.e. whether
+    it's a usable uncertainty proxy at inference time.
+    """
+    folder = os.path.join(save_path_summary, "summary_plots")
+    os.makedirs(folder, exist_ok=True)
+
+    Hext_range = np.asarray(Hext_range, dtype=float)
+    var = np.asarray(temporal_var_rcd, dtype=float)
+    err = np.asarray(trajectory_error, dtype=float)
+    valid = ~np.isnan(var) & ~np.isnan(err)
+
+    fig, axs = plt.subplots(1, 2, figsize=(13, 5.5))
+
+    line1, = axs[0].plot(Hext_range, var, color='darkorange', lw=2, label='Temporal Hd variance (model-internal)')
+    ax_twin = axs[0].twinx()
+    line2, = ax_twin.plot(Hext_range, err, color='crimson', lw=1.5, alpha=0.6, label='Trajectory error')
+    axs[0].set_xlabel('$H_{ext}$ [Oe]')
+    axs[0].set_ylabel('Temporal Hd variance', color='darkorange')
+    ax_twin.set_ylabel('Trajectory error', color='crimson')
+    axs[0].tick_params(axis='y', labelcolor='darkorange')
+    ax_twin.tick_params(axis='y', labelcolor='crimson')
+    axs[0].grid(alpha=0.3)
+    axs[0].legend(handles=[line1, line2], loc='upper right', fontsize=9)
+
+    r = np.corrcoef(var[valid], err[valid])[0, 1] if valid.sum() > 1 else np.nan
+    sc = axs[1].scatter(var[valid], err[valid], s=20, alpha=0.7, c=Hext_range[valid], cmap='coolwarm')
+    axs[1].set_xlabel('Temporal Hd variance')
+    axs[1].set_ylabel('Trajectory error')
+    axs[1].text(0.05, 0.95, f"r = {r:.3f}", transform=axs[1].transAxes, va='top',
+                bbox=dict(facecolor='white', alpha=0.9))
+    axs[1].grid(alpha=0.3)
+    fig.colorbar(sc, ax=axs[1], label='$H_{ext}$ [Oe]')
+
+    fig.suptitle("Temporal Hd Variance as an Uncertainty Proxy\n" + general_title_summary, fontsize=12, fontweight='bold')
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(folder, "temporal_variance_vs_error.png"), dpi=250)
+    plt.close()
+
+def compute_temporal_hd_variance(hd_history_buffer):
+    """
+    Given a short history of the U-Net's own Hd predictions at this cell,
+    compute the per-cell variance across that history as a proxy for "the model
+    itself is uncertain here". 
+
+    Returns
+    -------
+    variance_map : ndarray, shape (W, W) or (W, W, D)
+        Per-cell variance of |Hd| across the k history steps.
+    mean_variance : float
+        Spatial mean of variance_map -- use this as a scalar predictor,
+        the same way instantaneous_hd_mae etc. are used in `predictors`.
+    """
+    hd_history_buffer = np.asarray(hd_history_buffer)
+    hd_mag_history = np.linalg.norm(hd_history_buffer, axis=-1)  # (k, W, W[, D])
+    variance_map = np.var(hd_mag_history, axis=0)
+    mean_variance = float(np.mean(variance_map))
+    return variance_map, mean_variance

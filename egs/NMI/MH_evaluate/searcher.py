@@ -1,17 +1,144 @@
 # -*- coding: utf-8 -*-
 """
-Created on Wed July 08 11:00:00 2026
+searcher.py
+
+Purpose
+-------
+Screen candidate physical quantities (Hd magnitude, exchange energy,
+torque, vortex count, etc.) for whether they act as *leading indicators*
+of upcoming magnetic transitions (vortex nucleation/annihilation, domain
+switching) during an M-H sweep.
+
+This is meant to run on FFT-only sweep data (film1 / full_fft), with no
+trained UNet required, so you can shortlist promising physics-informed
+loss-weighting candidates *before* spending ~2 days training a UNet
+variant on one of them.
+
+Design principle: everything routes through ONE transition-event detector
+(detect_transition_events, based on vortex-count changes) and ONE lag
+correlation helper (_lag_correlate), so "event 1" and "best lag" mean the
+same thing in every function and CSV this module produces.
 """
-import numpy as np
-import torch
+
 import os
+import numpy as np
+import pandas as pd
+import torch
+import matplotlib.pyplot as plt
+from scipy.stats import pearsonr
+from dataclasses import dataclass, asdict
 import pandas as pd
 
+@dataclass
+class PhysicsSnapshot:
+    """
+    Stores one complete MH-step worth of physics.
+
+    Every row corresponds to ONE external field value after BOTH
+    FFT and UNet have converged.
+    """
+
+    # -----------------------------
+    # MH Sweep Information
+    # -----------------------------
+    mh_step: int
+    Hext: float
+
+    # -----------------------------
+    # Field Magnitudes (FFT)
+    # -----------------------------
+    hd_mean: float
+    hd_std: float
+    hd_max: float
+
+    he_mean: float
+    he_std: float
+    he_max: float
+
+    ha_mean: float
+    ha_std: float
+    ha_max: float
+
+    heff_mean: float
+    heff_std: float
+    heff_max: float
+
+    # -----------------------------
+    # Torque Magnitudes
+    # -----------------------------
+    tau_hd: float
+    tau_he: float
+    tau_ha: float
+    tau_heff: float
+
+    # -----------------------------
+    # Alignment
+    # -----------------------------
+    align_hd: float
+    align_he: float
+    align_ha: float
+    align_heff: float
+
+    # -----------------------------
+    # Energies
+    # -----------------------------
+    e_demag: float
+    e_exchange: float
+    e_anis: float
+    e_external: float
+    e_total: float
+
+    # -----------------------------
+    # Magnetization
+    # -----------------------------
+    mx: float
+    my: float
+    mz: float
+
+    m_projection: float
+
+    # -----------------------------
+    # Topology
+    # -----------------------------
+    winding_abs: float
+    vortex_count: int
+
+    # -----------------------------
+    # UNet Errors
+    # -----------------------------
+    hd_error: float
+    trajectory_error: float
+
+
+class PhysicsRecorder:
+
+    def __init__(self):
+        self.snapshots = []
+
+    def add(self, snapshot):
+        self.snapshots.append(snapshot)
+
+    def dataframe(self):
+        return pd.DataFrame(
+            [asdict(s) for s in self.snapshots]
+        )
+
+    def save_csv(self, filename):
+
+        df = self.dataframe()
+
+        df.to_csv(filename, index=False)
+
+        return df 
+
+# ============================================================================
+# MODEL INTROSPECTION
+# ============================================================================
 
 def inspect_model_quantities(model, name_filter=None):
     """
-    Automatically prints every numerical quantity stored inside the
-    MAG2305 model.
+    Print every numerical quantity stored on the MAG2305 model, to
+    see what's available to build a candidate predictor from.
     """
     print("\n" + "=" * 75)
     print(f"{'DISCOVERING AVAILABLE MODEL QUANTITIES':^75}")
@@ -26,12 +153,9 @@ def inspect_model_quantities(model, name_filter=None):
             value = getattr(model, name)
         except Exception:
             continue
-        
-        # Skip callable methods (functions) to focus only on data fields
         if callable(value):
             continue
 
-        # Type mapping
         if isinstance(value, torch.Tensor):
             type_str = f"Tensor({value.device})"
             info_str = f"shape={tuple(value.shape)}"
@@ -40,7 +164,6 @@ def inspect_model_quantities(model, name_filter=None):
             info_str = f"shape={value.shape}"
         elif np.isscalar(value):
             type_str = "scalar"
-            # Format floats so scientific values read cleanly
             info_str = f"value={value:.4g}" if isinstance(value, (float, np.floating)) else f"value={value}"
         else:
             type_str = type(value).__name__
@@ -50,13 +173,15 @@ def inspect_model_quantities(model, name_filter=None):
         print(f"{'name: ' + name:32s} | type: {type_str:15s} | {info_str}")
     print("=" * 75)
 
+
 def extract_candidate_predictors(model):
     """
-    Automatically extracts every scalar predictor from the model.
+    Automatically extract every scalar (or reducible tensor) quantity from
+    the model as a candidate predictor for this Hext step.
 
     Returns
     -------
-    predictors : dict
+    predictors : dict, name -> scalar value at this step
     """
     predictors = {}
 
@@ -67,8 +192,6 @@ def extract_candidate_predictors(model):
             value = getattr(model, name)
         except Exception:
             continue
-
-        # Skip callable methods (functions) to focus only on data fields
         if callable(value):
             continue
 
@@ -90,251 +213,301 @@ def extract_candidate_predictors(model):
     return predictors
 
 
-def analyze_transition_peaks(time, trajectory_error, parameter, parameter_name="Parameter", peak_threshold=None, window=20):
+# ============================================================================
+# TRANSITION EVENT DETECTION -- single shared convention
+# ============================================================================
+
+def detect_transition_events(vortex_count, event_type='both'):
     """
-    Analyze whether a parameter predicts trajectory error peaks.
-    """
-    error = np.asarray(trajectory_error)
-    parameter = np.asarray(parameter)
+    Detect distinct transition events from a vortex-count trajectory.
+    An event is a maximal run of consecutive Hext steps over which the
+    vortex count changes; the FIRST step of that run is reported as the
+    event onset. Every function in this module uses this detector, so
+    "event 1", "event 2", etc. refer to the same physical occurrences
+    everywhere -- CSV outputs and plots line up.
 
-    if peak_threshold is None:
-        peak_threshold = error.mean() + error.std()
-
-    peak_indices = np.where(error > peak_threshold)[0]
-
-    if len(peak_indices) == 0:
-        print("No peaks detected.")
-        return []
-
-    # Split into separate peaks
-    groups = []
-    current = [peak_indices[0]]
-
-    for idx in peak_indices[1:]:
-        if idx == current[-1] + 1:
-            current.append(idx)
-        else:
-            groups.append(current)
-            current = [idx]
-    groups.append(current)
-
-    results = []
-
-    print("=" * 75)
-    print(f"Peak analysis for {parameter_name:^75}")
-    print("=" * 75)
-
-    for i, group in enumerate(groups):
-        peak = group[np.argmax(error[group])]
-        start = max(0, peak - window)
-        end = min(len(error), peak + window + 1)
-
-        local_error = error[start:end]
-        local_parameter = parameter[start:end]
-        corr = np.corrcoef(local_error, local_parameter)[0, 1]
-
-        results.append({"peak_number": i + 1, 
-                        "peak_frame": peak,
-                        "peak_time": time[peak],
-                        "peak_error": error[peak],
-                        "correlation": corr,
-                        "parameter_mean": np.mean(local_parameter),
-                        "parameter_max": np.max(local_parameter)})
-        print(f"\nPeak {i+1}")
-        print(f"Frame: {peak}")
-        print(f"Time : {time[peak]:.4f}")
-        print(f"Error: {error[peak]:.6f}")
-        print(f"Local correlation: {corr:.3f}")
-        print(f"Parameter mean: {np.mean(local_parameter):.6f}")
-        print(f"Parameter max : {np.max(local_parameter):.6f}")
-
-    return results
-
-
-def compare_transition_predictors(time, trajectory_error, predictors, peak_threshold=None, 
-                                  window=20, csv_path=None, verbose=True, parameter_names=None):
-    """
-    Compare multiple physical quantities as predictors of trajectory-error peaks.
+    Parameters
+    ----------
+    vortex_count : array-like
+    event_type   : 'both' | 'nucleation' | 'annihilation'
 
     Returns
     -------
-    results_df : pandas.DataFrame
-        One row per (parameter, peak).
-    summary_df : pandas.DataFrame
-        Average absolute correlation ranking.
+    events : ndarray[int]   onset index of each event
+    kinds  : ndarray[str]   'nucleation' or 'annihilation' per event
     """
+    vc = np.asarray(vortex_count, dtype=float)
+    dv = np.diff(vc)
 
-    error = np.asarray(trajectory_error)
+    if event_type == 'nucleation':
+        change_idx = np.where(dv > 0)[0] + 1
+    elif event_type == 'annihilation':
+        change_idx = np.where(dv < 0)[0] + 1
+    else:
+        change_idx = np.where(dv != 0)[0] + 1
 
-    if parameter_names is not None:
-        predictors = {k: predictors[k] for k in parameter_names if k in predictors}
+    if len(change_idx) == 0:
+        return np.array([], dtype=int), np.array([], dtype=str)
 
-    if peak_threshold is None:
-        peak_threshold = error.mean() + error.std()
-
-    peak_indices = np.where(error > peak_threshold)[0]
-
-    if len(peak_indices) == 0:
-        raise ValueError("No trajectory-error peaks detected.")
-
-    groups = []
-    current = [peak_indices[0]]
-
-    for idx in peak_indices[1:]:
-        if idx == current[-1] + 1:
-            current.append(idx)
+    groups = [[change_idx[0]]]
+    for idx in change_idx[1:]:
+        if idx == groups[-1][-1] + 1:
+            groups[-1].append(idx)
         else:
-            groups.append(current)
-            current = [idx]
-    groups.append(current)
+            groups.append([idx])
 
-    peak_centers = []
-
-    for group in groups:
-        peak = group[np.argmax(error[group])]
-        peak_centers.append(peak)
-
-    rows = []
-
-    for parameter_name, values in predictors.items():
-        values = np.asarray(values)
-        for peak_number, peak in enumerate(peak_centers, start=1):
-            start = max(0, peak - window)
-            end = min(len(error), peak + window + 1)
-
-            local_error = error[start:end]
-            local_values = values[start:end]
-            corr = np.corrcoef(local_error, local_values)[0, 1]
-
-            if np.isnan(corr):
-                corr = 0.0
-
-            rows.append({"Parameter": parameter_name,
-                         "Peak": peak_number,
-                         "Frame": int(peak),
-                         "Time": float(time[peak]),
-                         "Peak Error": float(error[peak]),
-                         "Correlation": float(corr),
-                         "Abs Correlation": abs(float(corr)),
-                         "Mean Parameter": float(np.mean(local_values)),
-                         "Max Parameter": float(np.max(local_values)),
-                         "Std Parameter": float(np.std(local_values))})
-
-    results_df = pd.DataFrame(rows)
-
-    summary_df = (results_df.groupby("Parameter")["Abs Correlation"].mean().sort_values(ascending=False).reset_index()
-                  .rename(columns={"Abs Correlation": "Average |Correlation|"}))
-
-    if verbose:
-        print("\n")
-        print("=" * 80)
-        print("TRANSITION PREDICTOR ANALYSIS")
-        print("=" * 80)
-
-        for peak in sorted(results_df["Peak"].unique()):
-            table = (results_df[results_df["Peak"] == peak].sort_values("Abs Correlation", ascending=False))
-
-            print("\n")
-            print("-" * 80)
-            print(f"Peak {peak}")
-            print("-" * 80)
-            print(table[["Parameter", "Correlation", "Mean Parameter", "Max Parameter"]].to_string(index=False))
-
-        print("\n")
-        print("=" * 80)
-        print("OVERALL RANKING")
-        print("=" * 80)
-        print(summary_df.to_string(index=False))
-
-    if csv_path is not None:
-        os.makedirs(csv_path, exist_ok=True)
-        results_df.to_csv(os.path.join(csv_path, "transition_predictor_results.csv"),index=False)
-        summary_df.to_csv(os.path.join(csv_path, "transition_predictor_summary.csv"),index=False)
-
-        if verbose:
-            print("\nCSV files written to:")
-            print(csv_path)
-
-    return results_df, summary_df
+    events = np.array([g[0] for g in groups], dtype=int)
+    kinds = np.array(['nucleation' if dv[e - 1] > 0 else 'annihilation' for e in events])
+    return events, kinds
 
 
-def rank_transition_predictors(trajectory_error, predictor_dict, Hext_range, save_path, peak_count=2, max_lag=20):
+# ============================================================================
+# LAG CORRELATION -- single shared convention
+# ============================================================================
+
+def _lag_correlate(reference, signal, max_lag):
     """
-    Automatically ranks every transition predictor by correlation with
-    trajectory error.
-    """
+    Scan lags in [-max_lag, +max_lag] for the strongest |Pearson r|
+    between `reference` and `signal`.
 
-    out_dir = os.path.join(save_path, "transition_analysis")
+    Sign convention (fixed across this whole module):
+        best_lag > 0  =>  `signal` LEADS `reference` by best_lag steps
+                          (signal[t] lines up with reference[t + best_lag]).
+    Call with reference=trajectory_error (or an event indicator) and
+    signal=candidate_predictor, so a positive best_lag directly means
+    "this predictor rises before the error/event" -- the leading-indicator
+    property you actually want for a loss weight.
+    """
+    reference = np.asarray(reference, dtype=float)
+    signal = np.asarray(signal, dtype=float)
+
+    r0, _ = pearsonr(reference, signal)
+    best_r, best_lag = r0, 0
+
+    for lag in range(1, max_lag + 1):
+        r_lead, _ = pearsonr(reference[lag:], signal[:-lag])   # signal leads
+        r_lag, _ = pearsonr(reference[:-lag], signal[lag:])    # signal lags
+        if abs(r_lead) > abs(best_r):
+            best_r, best_lag = r_lead, lag
+        if abs(r_lag) > abs(best_r):
+            best_r, best_lag = r_lag, -lag
+
+    return best_r, best_lag
+
+
+# ============================================================================
+# LEAD-TIME ESTIMATION 
+# ============================================================================
+
+def estimate_lead_time(predictor, events, max_window=20, z_thresh=1.5):
+    """
+    For each detected transition event, ask: how many steps BEFORE the
+    event does `predictor` first deviate from its "quiet" baseline and
+    stay deviated through to the event? That step count is the event's
+    lead time -- directly answers "would this quantity give my loss
+    function advance warning of a transition."
+
+    Baseline is computed from all sweep points that are NOT within
+    max_window of any event, so a predictor that's simply high everywhere
+    doesn't get credited with a false lead time.
+
+    Parameters
+    ----------
+    predictor  : array-like, one value per Hext step
+    events     : ndarray[int], event onset indices (from detect_transition_events)
+    max_window : int, how many steps back to search for onset of deviation
+    z_thresh   : float, deviation threshold in baseline std units
+
+    Returns
+    -------
+    lead_times : ndarray[int], per event, steps of early warning (0 = none detected)
+    detected   : ndarray[bool], per event, whether any lead time was found
+    baseline_mean, baseline_std : float
+    """
+    predictor = np.asarray(predictor, dtype=float)
+    n = len(predictor)
+
+    quiet_mask = np.ones(n, dtype=bool)
+    for e in events:
+        lo, hi = max(0, e - max_window), min(n, e + max_window + 1)
+        quiet_mask[lo:hi] = False
+
+    if quiet_mask.sum() < 2:
+        baseline_mean, baseline_std = np.mean(predictor), np.std(predictor)
+    else:
+        baseline_mean = predictor[quiet_mask].mean()
+        baseline_std = predictor[quiet_mask].std()
+    baseline_std = baseline_std if baseline_std > 1e-12 else 1e-12
+
+    lead_times = np.zeros(len(events), dtype=int)
+    detected = np.zeros(len(events), dtype=bool)
+
+    for i, e in enumerate(events):
+        lo = max(0, e - max_window)
+        window_vals = predictor[lo:e]          # strictly before the event
+        z = (window_vals - baseline_mean) / baseline_std
+
+        # walk backward from the event; find the longest unbroken run of
+        # |z| > z_thresh ending immediately before the event
+        run = 0
+        for val in z[::-1]:
+            if abs(val) > z_thresh:
+                run += 1
+            else:
+                break
+        lead_times[i] = run
+        detected[i] = run > 0
+
+    return lead_times, detected, baseline_mean, baseline_std
+
+
+# ============================================================================
+# MAIN RANKING PIPELINE
+# ============================================================================
+
+def rank_leading_indicators(predictor_dict, vortex_count, trajectory_error,
+                             Hext_range, save_path, event_type='both',
+                             max_window=20, z_thresh=1.5, max_lag=15):
+    """
+    Rank every candidate predictor by how well it anticipates transitions.
+
+    Two complementary metrics per predictor:
+      1. Lead time against detected transition events (primary) --
+         mean steps of early warning, and detection rate across events.
+      2. Best leading-lag correlation against trajectory_error (secondary)
+         -- ties the predictor to the error behavior your prior work
+         already established correlates with transitions.
+
+    Writes a CSV and prints a ranked summary. Sort order: detection rate,
+    then mean lead time, then |leading lag correlation| -- i.e. "does it
+    warn you at all" beats "how early" beats "how strongly correlated."
+
+    Returns
+    -------
+    summary_df : pandas.DataFrame, one row per predictor, sorted best-first
+    """
+    out_dir = os.path.join(save_path, "leading_indicator_analysis")
     os.makedirs(out_dir, exist_ok=True)
 
-    error = np.asarray(trajectory_error)
+    events, kinds = detect_transition_events(vortex_count, event_type=event_type)
+    if len(events) == 0:
+        print(f"[rank_leading_indicators] No '{event_type}' transition events detected; skipping.")
+        return pd.DataFrame()
 
-    peak_indices = np.argpartition(error, -peak_count)[-peak_count:]
-    peak_indices = peak_indices[np.argsort(error[peak_indices])[::-1]]
+    error = np.asarray(trajectory_error, dtype=float)
+    rows = []
 
-    results = []
+    for name, values in predictor_dict.items():
+        values = np.asarray(values, dtype=float)
+        if len(values) != len(error):
+            print(f"  [skip] '{name}' length {len(values)} != trajectory_error length {len(error)}")
+            continue
 
-    for name, predictor in predictor_dict.items():
-        predictor = np.asarray(predictor)
+        lead_times, detected, base_mean, base_std = estimate_lead_time(
+            values, events, max_window=max_window, z_thresh=z_thresh)
 
-        r, p = pearsonr(error, predictor)
+        best_r, best_lag = _lag_correlate(error, values, max_lag=max_lag)
 
-        best_r = r
-        best_lag = 0
+        rows.append({
+            "Predictor": name,
+            "Detection Rate": detected.mean(),
+            "Mean Lead Time (steps)": lead_times[detected].mean() if detected.any() else 0.0,
+            "Max Lead Time (steps)": int(lead_times.max()) if len(lead_times) else 0,
+            "N Events": len(events),
+            "N Detected": int(detected.sum()),
+            "Leading Lag r (vs error)": best_r,
+            "Leading Lag (steps, +=leads)": best_lag,
+            "Baseline Mean": base_mean,
+            "Baseline Std": base_std,
+        })
 
-        for lag in range(-max_lag, max_lag + 1):
-            if lag < 0:
-                rlag, _ = pearsonr(error[-lag:], predictor[:lag])
-            elif lag > 0:
-                rlag, _ = pearsonr(error[:-lag], predictor[lag:])
-            else:
-                rlag = r
+    summary_df = pd.DataFrame(rows)
+    if summary_df.empty:
+        print("[rank_leading_indicators] No usable predictors (length mismatch with trajectory_error).")
+        return summary_df
 
-            if abs(rlag) > abs(best_r):
-                best_r = rlag
-                best_lag = lag
+    summary_df = summary_df.sort_values(
+        by=["Detection Rate", "Mean Lead Time (steps)", "Leading Lag r (vs error)"],
+        key=lambda col: col.abs() if col.name == "Leading Lag r (vs error)" else col,
+        ascending=False
+    ).reset_index(drop=True)
 
-        row = [name, r, abs(r), p, best_r, abs(best_r), best_lag]
+    csv_file = os.path.join(out_dir, f"leading_indicator_ranking_{event_type}.csv")
+    summary_df.to_csv(csv_file, index=False)
 
-        # Add info for every peak
-        for idx in peak_indices:
-            row.append(Hext_range[idx])
-            row.append(error[idx])
-            row.append(predictor[idx])
-
-        # Distance from nearest local maximum
-        predictor_peak = np.argmax(predictor)
-        nearest = np.min(np.abs(peak_indices - predictor_peak))
-
-        row.append(predictor_peak)
-        row.append(nearest)
-        results.append(row)
-
-    # Sort automatically by usefulness
-    results.sort(key=lambda x: abs(x[5]), reverse=True)
-
-    csv_file = os.path.join(out_dir, "transition_predictor_ranking.csv")
-
-    header = ["Predictor", "Pearson r", "|Pearson|", "p-value", "Best Lag Correlation", "|Best Lag Corr|", "Best Lag"]
-
-    for i in range(peak_count):
-        header.extend([f"Peak {i+1} Hext", f"Peak {i+1} Error", f"Predictor at Peak {i+1}"])
-
-    header.extend(["Predictor Maximum Index", "Distance From Nearest Error Peak"])
-
-    with open(csv_file, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(header)
-        writer.writerows(results)
+    events_file = os.path.join(out_dir, f"detected_events_{event_type}.csv")
+    pd.DataFrame({
+        "event_index": events,
+        "Hext": np.asarray(Hext_range)[events],
+        "kind": kinds,
+    }).to_csv(events_file, index=False)
 
     print()
+    print(f"Detected {len(events)} '{event_type}' transition event(s).")
     print(csv_file)
-
     print()
-    print("Top Transition Predictors")
-    print("-------------------------")
+    print("Top Leading Indicators")
+    print("-" * 90)
+    print(summary_df[["Predictor", "Detection Rate", "Mean Lead Time (steps)",
+                       "Leading Lag r (vs error)", "Leading Lag (steps, +=leads)"]]
+          .head(10).to_string(index=False))
 
-    for row in results[:10]:
-        print(f"{row[0]:30s}" f"  Lag Corr = {row[5]:.3f}" f"   Lag = {row[6]}")
+    return summary_df
 
-    return results
+
+# ============================================================================
+# VISUALIZATION
+# ============================================================================
+
+def plot_leading_indicators(Hext_range, trajectory_error, predictor_dict,
+                             vortex_count, general_title, save_path,
+                             event_type='both', top_n=6, max_window=20, z_thresh=1.5):
+    """
+    Plot normalized trajectory error alongside the top-N candidate
+    predictors (ranked by rank_leading_indicators), with vertical markers
+    at each detected transition event. Legend reports each predictor's
+    mean lead time so you can see at a glance which quantities rise
+    before the dashed event lines rather than after.
+    """
+    folder = os.path.join(save_path, "leading_indicator_analysis")
+    os.makedirs(folder, exist_ok=True)
+
+    events, kinds = detect_transition_events(vortex_count, event_type=event_type)
+    ranking = rank_leading_indicators(predictor_dict, vortex_count, trajectory_error,
+                                       Hext_range, save_path, event_type=event_type,
+                                       max_window=max_window, z_thresh=z_thresh)
+    if ranking.empty:
+        return
+
+    top_names = ranking["Predictor"].head(top_n).tolist()
+
+    def normalize(x):
+        x = np.asarray(x, dtype=float)
+        rng = np.max(x) - np.min(x)
+        return np.zeros_like(x) if rng == 0 else (x - np.min(x)) / rng
+
+    error = np.asarray(trajectory_error, dtype=float)
+
+    plt.figure(figsize=(14, 8))
+    plt.plot(Hext_range, normalize(error), linewidth=3, color="black", label="Trajectory Error")
+
+    colors = plt.cm.tab10(np.linspace(0, 1, len(top_names)))
+    for color, name in zip(colors, top_names):
+        row = ranking[ranking["Predictor"] == name].iloc[0]
+        label = f"{name} (lead={row['Mean Lead Time (steps)']:.1f} steps, det={row['Detection Rate']:.0%})"
+        plt.plot(Hext_range, normalize(predictor_dict[name]), linewidth=2, alpha=0.85,
+                  color=color, label=label)
+
+    for e, kind in zip(events, kinds):
+        ls = '--' if kind == 'nucleation' else ':'
+        plt.axvline(Hext_range[e], color="red", linestyle=ls, alpha=0.5)
+
+    plt.grid(alpha=0.3)
+    plt.xlabel("External Field (Oe)")
+    plt.ylabel("Normalized Quantity")
+    plt.title(general_title + f"\n\nLeading Indicators of Transitions ({event_type})",
+              fontsize=13, fontweight='bold')
+    plt.legend(fontsize=8, loc='upper right')
+    plt.tight_layout()
+    plt.savefig(os.path.join(folder, f"leading_indicators_{event_type}.png"), dpi=250)
+    plt.close()
