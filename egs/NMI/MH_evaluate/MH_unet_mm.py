@@ -16,7 +16,12 @@ import csv
 from scipy.stats import pearsonr
 from collections import deque
 
-from egs.NMI.MH_evaluate.searcher import _lag_correlate,estimate_lead_time, extract_candidate_predictors, detect_transition_events, rank_leading_indicators, inspect_model_quantities, plot_leading_indicators
+from egs.NMI.MH_evaluate.searcher import (
+    PhysicsRecorder,
+    detect_transition_events,
+    rank_leading_indicators,
+    plot_leading_indicators,
+)
 from libs.misc import Culist, MaskTp, spin_prepare, winding_density
 import libs.MAG2305 as MAG2305
 from libs.Unet import UNet
@@ -380,6 +385,8 @@ if __name__ == '__main__':
     save_iteration_plots = os.path.join(filename, "iteration_plots")
     os.makedirs(save_iteration_plots, exist_ok=True)
 
+    physics_recorder = PhysicsRecorder()
+
     # Main loop
     for nloop, Hext_val in enumerate(Hext_range):
         save_path_iteration = os.path.join(filename, f"iteration_plots_{nloop}")
@@ -403,14 +410,16 @@ if __name__ == '__main__':
         final_err_fft = error1_rcd[-1] if len(error1_rcd) > 0 else 0.0
         final_err_un  = error2_rcd[-1] if len(error2_rcd) > 0 else 0.0
 
+        predictor_dict = physics_recorder.predictor_dict()
+
         film1.GetEnergy_detailed(Hext=Hext)
         film2.GetEnergy_detailed(Hext=Hext)
 
         # Extract topological counts using winding density 
         spin_fft_tensor = film1.Spin.permute(3, 0, 1, 2)[:, :, :, 0].unsqueeze(0)
         spin_un_tensor  = film2.Spin.permute(3, 0, 1, 2)[:, :, :, 0].unsqueeze(0)
-        _, vortex_count_fft, _ = winding_density(spin_fft_tensor)
-        _, vortex_count_un,  _ = winding_density(spin_un_tensor)
+        _, winding_abs_fft, winding_sum_fft = winding_density(spin_fft_tensor)
+        _, winding_abs_un, winding_sum_un = winding_density(spin_un_tensor)
 
         full_fft['iters'].append(itern1)
         full_fft['vortices'].append(vortex_count_fft)
@@ -457,6 +466,23 @@ if __name__ == '__main__':
         heff_error_mae.append(np.mean(np.abs(film2.Heff.detach().cpu().numpy() - film1.Heff.detach().cpu().numpy())))
         hd_error_mae.append(np.mean(np.abs(film2.Hd.detach().cpu().numpy() - film1.Hd.detach().cpu().numpy())))
         trajectory_shift_mae.append(np.mean(np.abs(film2.Spin.detach().cpu().numpy() - film1.Spin.detach().cpu().numpy())))
+
+        # Record one converged M-H-step row. FFT quantities are predictors;
+        # UNet quantities and FFT-vs-UNet errors are diagnostics/targets.
+        physics_recorder.capture(mh_step=nloop, hext_scalar=Hext_val, hext_vector=Hext, film_fft=film1,
+            film_unet=film2,
+            fft_winding_abs=winding_abs_fft,
+            fft_winding_sum=winding_sum_fft,
+            unet_winding_abs=winding_abs_un,
+            unet_winding_sum=winding_sum_un,
+            fft_iterations=itern1,
+            unet_iterations=itern2,
+            fft_final_convergence_error=final_err_fft,
+            unet_final_convergence_error=final_err_un,
+            fft_runtime_seconds=time_elapsed_fft,
+            unet_runtime_seconds=time_elapsed_un,
+            cell_count=cell_count,
+        )
 
         spin_mm = film1.Spin.detach().cpu().numpy()
         spin_un = film2.Spin.detach().cpu().numpy()
@@ -523,6 +549,10 @@ if __name__ == '__main__':
             np.save(filename + "Hc{}_spin_un".format(nloop-1), spin0_un)
             np.save(filename + "Hc{}_spin_un".format(nloop), spin_un)
 
+    physics_csv = os.path.join(filename, "physics_snapshots.csv")
+    physics_df = physics_recorder.save_csv(physics_csv)
+    print(f"Saved {len(physics_df)} converged physics snapshots to {physics_csv}")
+
     plot_full_energy_summary(general_title_summary, save_path_summary, full_fft, full_un, Hext_range)
     plot_performance_summary(general_title_summary, save_path_summary, full_fft, full_un, Hext_range)
     plot_error_summary(general_title_summary, save_path_summary, Hext_range, hd_error_mae, trajectory_shift_mae, 
@@ -532,59 +562,18 @@ if __name__ == '__main__':
     plot_error_correlations(general_title_summary, save_path_summary, hd_error_mae, hex_error_mae, hanis_error_mae, 
                             trajectory_shift_mae, Hext_range=Hext_range)
 
-    # predictors2 = {"Vortex Count": vortex_count,
-    #                "Winding Density": winding_density,
-    #                "Gradient Magnitude": grad_mag,
-    #                "Exchange Energy": exchange_energy,
-    #                "Demag Torque": demag_torque,
-    #                "Precessional Torque": precessional_torque,
-    #                "Hexch Error": hexch_error,
-    #                "Hanis Error": hanis_error,
-    #                "Hdemag Error": hdemag_error,}
+    # Part 1 output for the later leading-indicator analyzer.
+    # Do not include UNet errors or topology labels in predictor_dict.
+    predictor_dict = physics_recorder.predictor_dict()
+    trajectory_error = physics_df["spin_mae"].to_numpy(dtype=float)
+    transition_signal = physics_df["fft_winding_abs"].to_numpy(dtype=float)
 
-    predictors = {"Hd Error": hd_error_mae,
-                  "Hex Error": hex_error_mae,
-                  "Hanis Error": hanis_error_mae,
-                  "Heff Error": heff_error_mae,
-                  "Hd Magnitude": hd_mm_plot,
-                  "Hex Magnitude": hex_mm_plot,
-                  "Hanis Magnitude": hanis_mm_plot,
-                  "Heff Magnitude": heff_mm_plot,
-                  "Mz": full_fft["mz"],
-                  "Vortex Count": full_fft["vortices"],
-                  "Demag Energy": full_fft["demag"],
-                  "Exchange Energy": full_fft["excha"],
-                  "Anisotropy Energy": full_fft["anis"]}
-    
-    inspect_model_quantities(film1)
-    predictors = extract_candidate_predictors(film1)
-    print(predictors.keys())
-
-    events, kinds = detect_transition_events(full_fft['vortices'], event_type='both')
+    events, kinds = detect_transition_events(transition_signal, event_type="both")
     for event, kind in zip(events, kinds):
-        print(f"Event: {event}, Kind: {kind}")
-
-    events, kinds = detect_transition_events(full_fft['vortices'], event_type='nucleation')
-    for event, kind in zip(events, kinds):
-        print(f"Event: {event}, Kind: {kind}")
-
-    events, kinds = detect_transition_events(full_fft['vortices'], event_type='annihilation')
-    for event, kind in zip(events, kinds):
-        print(f"Event: {event}, Kind: {kind}")
-
-    # lead_times, detected, mean, std = estimate_lead_time(predictor_history, events)
-
-    # lead_times, detected, _, _ = estimate_lead_time(
-    # predictor=np.array(hd_error_history),
-    # events=events)
-
-    # r, lag = _lag_correlate(trajectory_error, hd_error_history, max_lag=20)
-
-    # estimate_lead_time(predictor, events, max_window=20, z_thresh=1.5)
-    # rank_leading_indicators(predictor_dict, vortex_count, trajectory_error, Hext_range, save_path_summary, event_type='both',
-    #                          max_window=20, z_thresh=1.5, max_lag=15)
-    # plot_leading_indicators(Hext_range, trajectory_error, predictor_dict, vortex_count, general_title, save_path_summary,
-    #                          event_type='both', top_n=6, max_window=20, z_thresh=1.5)
+        print(
+            f"Transition event at step {event}, "
+            f"Hext={physics_df.loc[event, 'hext_scalar']:.1f} Oe, kind={kind}"
+        )
     
     plot_error_vs_transition_proximity(general_title_summary, save_path_summary, trajectory_shift_mae, full_fft["vortices"], event_type='both')
     plot_error_vs_transition_proximity(general_title_summary, save_path_summary, trajectory_shift_mae, full_fft["vortices"], event_type='nucleation')

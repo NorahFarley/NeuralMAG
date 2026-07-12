@@ -1,153 +1,426 @@
 # -*- coding: utf-8 -*-
 """
-searcher.py
+Physics-aware data collection and leading-indicator analysis for NeuralMAG
+M-H sweeps.
 
-Purpose
--------
-Screen candidate physical quantities (Hd magnitude, exchange energy,
-torque, vortex count, etc.) for whether they act as *leading indicators*
-of upcoming magnetic transitions (vortex nucleation/annihilation, domain
-switching) during an M-H sweep.
-
-This is meant to run on FFT-only sweep data (film1 / full_fft), with no
-trained UNet required, so you can shortlist promising physics-informed
-loss-weighting candidates *before* spending ~2 days training a UNet
-variant on one of them.
-
-Design principle: everything routes through ONE transition-event detector
-(detect_transition_events, based on vortex-count changes) and ONE lag
-correlation helper (_lag_correlate), so "event 1" and "best lag" mean the
-same thing in every function and CSV this module produces.
+One PhysicsSnapshot is recorded after the FFT and UNet solvers have converged
+at one external-field step. Predictor columns are derived only from the FFT
+reference solution. UNet quantities are stored separately as diagnostics and
+error targets.
 """
 
+from __future__ import annotations
+
 import os
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Dict, Iterable, Optional, Sequence, Tuple
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
-import matplotlib.pyplot as plt
 from scipy.stats import pearsonr
-from dataclasses import dataclass, asdict
-import pandas as pd
 
-@dataclass
+
+_EPS = 1.0e-12
+
+
+def _as_float(value, default=np.nan) -> float:
+    """Convert Python/NumPy/Torch scalar-like values to a plain float."""
+    if value is None:
+        return float(default)
+    if isinstance(value, torch.Tensor):
+        if value.numel() == 0:
+            return float(default)
+        return float(value.detach().mean().cpu().item())
+    try:
+        return float(np.asarray(value).mean())
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _masked_values(values: torch.Tensor, active_mask: torch.Tensor) -> torch.Tensor:
+    """Return values at magnetic cells only; fall back to all values if needed."""
+    selected = values[active_mask]
+    return selected if selected.numel() else values.reshape(-1)
+
+
+def _field_statistics(field: torch.Tensor, active_mask: torch.Tensor) -> Dict[str, float]:
+    magnitudes = torch.linalg.vector_norm(field, dim=-1)
+    magnitudes = _masked_values(magnitudes, active_mask)
+    return {
+        "mean": float(magnitudes.mean().item()),
+        "std": float(magnitudes.std(unbiased=False).item()),
+        "max": float(magnitudes.max().item()),
+        "rms": float(torch.sqrt(torch.mean(magnitudes.square())).item()),
+    }
+
+
+def _torque_statistics(spin: torch.Tensor, field: torch.Tensor,
+                       active_mask: torch.Tensor) -> Dict[str, float]:
+    torque = torch.linalg.vector_norm(torch.cross(spin, field, dim=-1), dim=-1)
+    torque = _masked_values(torque, active_mask)
+    return {
+        "mean": float(torque.mean().item()),
+        "max": float(torque.max().item()),
+        "rms": float(torch.sqrt(torch.mean(torque.square())).item()),
+    }
+
+
+def _alignment_statistics(spin: torch.Tensor, field: torch.Tensor,
+                          active_mask: torch.Tensor) -> Dict[str, float]:
+    spin_norm = torch.linalg.vector_norm(spin, dim=-1)
+    field_norm = torch.linalg.vector_norm(field, dim=-1)
+    cosine = torch.sum(spin * field, dim=-1) / (spin_norm * field_norm + _EPS)
+    cosine = _masked_values(cosine, active_mask)
+    return {
+        "mean": float(cosine.mean().item()),
+        "abs_mean": float(cosine.abs().mean().item()),
+        "std": float(cosine.std(unbiased=False).item()),
+    }
+
+
+def _energy_value(model, attribute: str) -> float:
+    """Read an energy tensor/scalar after model.GetEnergy_detailed(...)."""
+    return _as_float(getattr(model, attribute, None))
+
+
+def _vector_error(reference: torch.Tensor, prediction: torch.Tensor,
+                  active_mask: torch.Tensor) -> Dict[str, float]:
+    """Spatial errors between two vector fields, restricted to magnetic cells."""
+    difference = prediction - reference
+    component_abs = difference.abs()
+    vector_l2 = torch.linalg.vector_norm(difference, dim=-1)
+    ref_norm = torch.linalg.vector_norm(reference, dim=-1)
+    pred_norm = torch.linalg.vector_norm(prediction, dim=-1)
+    cosine = torch.sum(reference * prediction, dim=-1) / (ref_norm * pred_norm + _EPS)
+
+    component_abs = component_abs[active_mask]
+    vector_l2 = _masked_values(vector_l2, active_mask)
+    cosine = _masked_values(cosine, active_mask)
+
+    ref_active = reference[active_mask]
+    denom = torch.sqrt(torch.mean(ref_active.square())) + _EPS
+    return {
+        "mae": float(component_abs.mean().item()),
+        "rmse": float(torch.sqrt(torch.mean(difference[active_mask].square())).item()),
+        "vector_l2_mean": float(vector_l2.mean().item()),
+        "vector_l2_max": float(vector_l2.max().item()),
+        "relative_rmse": float((torch.sqrt(torch.mean(difference[active_mask].square())) / denom).item()),
+        "cosine_mean": float(cosine.mean().item()),
+    }
+
+
+@dataclass(frozen=True)
 class PhysicsSnapshot:
-    """
-    Stores one complete MH-step worth of physics.
+    """One converged external-field step from an M-H sweep."""
 
-    Every row corresponds to ONE external field value after BOTH
-    FFT and UNet have converged.
-    """
-
-    # -----------------------------
-    # MH Sweep Information
-    # -----------------------------
     mh_step: int
-    Hext: float
+    hext_scalar: float
+    hext_x: float
+    hext_y: float
+    hext_z: float
 
-    # -----------------------------
-    # Field Magnitudes (FFT)
-    # -----------------------------
-    hd_mean: float
-    hd_std: float
-    hd_max: float
+    # FFT ground-truth field statistics: physical predictors.
+    fft_hd_mean: float
+    fft_hd_std: float
+    fft_hd_max: float
+    fft_hd_rms: float
+    fft_he_mean: float
+    fft_he_std: float
+    fft_he_max: float
+    fft_he_rms: float
+    fft_ha_mean: float
+    fft_ha_std: float
+    fft_ha_max: float
+    fft_ha_rms: float
+    fft_heff_mean: float
+    fft_heff_std: float
+    fft_heff_max: float
+    fft_heff_rms: float
 
-    he_mean: float
-    he_std: float
-    he_max: float
+    # FFT ground-truth torques.
+    fft_tau_hd_mean: float
+    fft_tau_hd_max: float
+    fft_tau_hd_rms: float
+    fft_tau_he_mean: float
+    fft_tau_he_max: float
+    fft_tau_he_rms: float
+    fft_tau_ha_mean: float
+    fft_tau_ha_max: float
+    fft_tau_ha_rms: float
+    fft_tau_heff_mean: float
+    fft_tau_heff_max: float
+    fft_tau_heff_rms: float
 
-    ha_mean: float
-    ha_std: float
-    ha_max: float
+    # FFT ground-truth spin/field alignment.
+    fft_align_hd_mean: float
+    fft_align_hd_abs_mean: float
+    fft_align_hd_std: float
+    fft_align_he_mean: float
+    fft_align_he_abs_mean: float
+    fft_align_he_std: float
+    fft_align_ha_mean: float
+    fft_align_ha_abs_mean: float
+    fft_align_ha_std: float
+    fft_align_heff_mean: float
+    fft_align_heff_abs_mean: float
+    fft_align_heff_std: float
 
-    heff_mean: float
-    heff_std: float
-    heff_max: float
+    # FFT ground-truth energies.
+    fft_e_demag: float
+    fft_e_exchange: float
+    fft_e_anis: float
+    fft_e_external: float
+    fft_e_total: float
 
-    # -----------------------------
-    # Torque Magnitudes
-    # -----------------------------
-    tau_hd: float
-    tau_he: float
-    tau_ha: float
-    tau_heff: float
+    # FFT ground-truth magnetization and topology.
+    fft_mx: float
+    fft_my: float
+    fft_mz: float
+    fft_mz_abs_mean: float
+    fft_m_projection: float
+    fft_winding_abs: float
+    fft_winding_sum: float
 
-    # -----------------------------
-    # Alignment
-    # -----------------------------
-    align_hd: float
-    align_he: float
-    align_ha: float
-    align_heff: float
+    # UNet state summaries: diagnostics, never predictor candidates by default.
+    unet_mx: float
+    unet_my: float
+    unet_mz: float
+    unet_mz_abs_mean: float
+    unet_m_projection: float
+    unet_winding_abs: float
+    unet_winding_sum: float
 
-    # -----------------------------
-    # Energies
-    # -----------------------------
-    e_demag: float
-    e_exchange: float
-    e_anis: float
-    e_external: float
-    e_total: float
+    # FFT-vs-UNet accuracy targets.
+    hd_mae: float
+    hd_rmse: float
+    hd_vector_l2_mean: float
+    hd_vector_l2_max: float
+    hd_relative_rmse: float
+    hd_cosine_mean: float
+    spin_mae: float
+    spin_rmse: float
+    spin_vector_l2_mean: float
+    spin_vector_l2_max: float
+    spin_relative_rmse: float
+    spin_cosine_mean: float
+    he_mae: float
+    ha_mae: float
+    heff_mae: float
+    m_projection_abs_error: float
 
-    # -----------------------------
-    # Magnetization
-    # -----------------------------
-    mx: float
-    my: float
-    mz: float
-
-    m_projection: float
-
-    # -----------------------------
-    # Topology
-    # -----------------------------
-    winding_abs: float
-    vortex_count: int
-
-    # -----------------------------
-    # UNet Errors
-    # -----------------------------
-    hd_error: float
-    trajectory_error: float
+    # Solver diagnostics.
+    fft_iterations: int
+    unet_iterations: int
+    fft_final_convergence_error: float
+    unet_final_convergence_error: float
+    fft_runtime_seconds: float
+    unet_runtime_seconds: float
 
 
 class PhysicsRecorder:
+    """
+    Collect one PhysicsSnapshot per converged M-H field step.
 
-    def __init__(self):
+    Predictor data are selected with predictor_columns(); only columns whose
+    names start with ``fft_`` are considered, with topology labels and sweep
+    coordinates excluded by default.
+    """
+
+    def __init__(self) -> None:
         self.snapshots = []
 
-    def add(self, snapshot):
-        self.snapshots.append(snapshot)
+    def __len__(self) -> int:
+        return len(self.snapshots)
 
-    def dataframe(self):
-        return pd.DataFrame(
-            [asdict(s) for s in self.snapshots]
+    @torch.no_grad()
+    def capture(
+        self,
+        *,
+        mh_step: int,
+        hext_scalar: float,
+        hext_vector: Sequence[float],
+        film_fft,
+        film_unet,
+        fft_winding_abs,
+        fft_winding_sum,
+        unet_winding_abs,
+        unet_winding_sum,
+        fft_iterations: int,
+        unet_iterations: int,
+        fft_final_convergence_error: float,
+        unet_final_convergence_error: float,
+        fft_runtime_seconds: float,
+        unet_runtime_seconds: float,
+        cell_count: Optional[int] = None,
+    ) -> PhysicsSnapshot:
+        """Compute and append one converged M-H-step snapshot."""
+        hext = torch.as_tensor(hext_vector, dtype=film_fft.Spin.dtype,
+                               device=film_fft.Spin.device).reshape(3)
+
+        # A magnetic cell has nonzero spin. This excludes masked holes from all
+        # averages, preventing zero-valued geometry cells from diluting metrics.
+        active_fft = torch.linalg.vector_norm(film_fft.Spin, dim=-1) > _EPS
+        active_unet = torch.linalg.vector_norm(film_unet.Spin, dim=-1) > _EPS
+        active = active_fft & active_unet
+        if not torch.any(active):
+            raise ValueError("No active magnetic cells were found while recording physics.")
+
+        n_active = int(active.sum().item())
+        if cell_count is not None and int(cell_count) != n_active:
+            # Use the tensor-derived mask as the source of truth, but make the
+            # discrepancy visible because it usually indicates mask handling.
+            print(f"[PhysicsRecorder] active-cell count {n_active} differs from cell_count={cell_count}.")
+
+        fft_fields = {
+            "hd": _field_statistics(film_fft.Hd, active),
+            "he": _field_statistics(film_fft.He, active),
+            "ha": _field_statistics(film_fft.Ha, active),
+            "heff": _field_statistics(film_fft.Heff, active),
+        }
+        fft_torques = {
+            "hd": _torque_statistics(film_fft.Spin, film_fft.Hd, active),
+            "he": _torque_statistics(film_fft.Spin, film_fft.He, active),
+            "ha": _torque_statistics(film_fft.Spin, film_fft.Ha, active),
+            "heff": _torque_statistics(film_fft.Spin, film_fft.Heff, active),
+        }
+        fft_alignments = {
+            "hd": _alignment_statistics(film_fft.Spin, film_fft.Hd, active),
+            "he": _alignment_statistics(film_fft.Spin, film_fft.He, active),
+            "ha": _alignment_statistics(film_fft.Spin, film_fft.Ha, active),
+            "heff": _alignment_statistics(film_fft.Spin, film_fft.Heff, active),
+        }
+
+        fft_spin_active = film_fft.Spin[active]
+        unet_spin_active = film_unet.Spin[active]
+        fft_m = fft_spin_active.mean(dim=0)
+        unet_m = unet_spin_active.mean(dim=0)
+        hext_norm = torch.linalg.vector_norm(hext)
+        hext_direction = hext / hext_norm if hext_norm > _EPS else hext
+        fft_projection = torch.dot(fft_m, hext_direction).item()
+        unet_projection = torch.dot(unet_m, hext_direction).item()
+
+        hd_error = _vector_error(film_fft.Hd, film_unet.Hd, active)
+        spin_error = _vector_error(film_fft.Spin, film_unet.Spin, active)
+        he_error = _vector_error(film_fft.He, film_unet.He, active)
+        ha_error = _vector_error(film_fft.Ha, film_unet.Ha, active)
+        heff_error = _vector_error(film_fft.Heff, film_unet.Heff, active)
+
+        snapshot = PhysicsSnapshot(
+            mh_step=int(mh_step),
+            hext_scalar=float(hext_scalar),
+            hext_x=float(hext[0].item()),
+            hext_y=float(hext[1].item()),
+            hext_z=float(hext[2].item()),
+
+            fft_hd_mean=fft_fields["hd"]["mean"], fft_hd_std=fft_fields["hd"]["std"],
+            fft_hd_max=fft_fields["hd"]["max"], fft_hd_rms=fft_fields["hd"]["rms"],
+            fft_he_mean=fft_fields["he"]["mean"], fft_he_std=fft_fields["he"]["std"],
+            fft_he_max=fft_fields["he"]["max"], fft_he_rms=fft_fields["he"]["rms"],
+            fft_ha_mean=fft_fields["ha"]["mean"], fft_ha_std=fft_fields["ha"]["std"],
+            fft_ha_max=fft_fields["ha"]["max"], fft_ha_rms=fft_fields["ha"]["rms"],
+            fft_heff_mean=fft_fields["heff"]["mean"], fft_heff_std=fft_fields["heff"]["std"],
+            fft_heff_max=fft_fields["heff"]["max"], fft_heff_rms=fft_fields["heff"]["rms"],
+
+            fft_tau_hd_mean=fft_torques["hd"]["mean"], fft_tau_hd_max=fft_torques["hd"]["max"],
+            fft_tau_hd_rms=fft_torques["hd"]["rms"],
+            fft_tau_he_mean=fft_torques["he"]["mean"], fft_tau_he_max=fft_torques["he"]["max"],
+            fft_tau_he_rms=fft_torques["he"]["rms"],
+            fft_tau_ha_mean=fft_torques["ha"]["mean"], fft_tau_ha_max=fft_torques["ha"]["max"],
+            fft_tau_ha_rms=fft_torques["ha"]["rms"],
+            fft_tau_heff_mean=fft_torques["heff"]["mean"], fft_tau_heff_max=fft_torques["heff"]["max"],
+            fft_tau_heff_rms=fft_torques["heff"]["rms"],
+
+            fft_align_hd_mean=fft_alignments["hd"]["mean"], fft_align_hd_abs_mean=fft_alignments["hd"]["abs_mean"],
+            fft_align_hd_std=fft_alignments["hd"]["std"],
+            fft_align_he_mean=fft_alignments["he"]["mean"], fft_align_he_abs_mean=fft_alignments["he"]["abs_mean"],
+            fft_align_he_std=fft_alignments["he"]["std"],
+            fft_align_ha_mean=fft_alignments["ha"]["mean"], fft_align_ha_abs_mean=fft_alignments["ha"]["abs_mean"],
+            fft_align_ha_std=fft_alignments["ha"]["std"],
+            fft_align_heff_mean=fft_alignments["heff"]["mean"], fft_align_heff_abs_mean=fft_alignments["heff"]["abs_mean"],
+            fft_align_heff_std=fft_alignments["heff"]["std"],
+
+            fft_e_demag=_energy_value(film_fft, "Energy_demag"),
+            fft_e_exchange=_energy_value(film_fft, "Energy_excha"),
+            fft_e_anis=_energy_value(film_fft, "Energy_aniso"),
+            fft_e_external=_energy_value(film_fft, "Energy_exter"),
+            fft_e_total=_energy_value(film_fft, "Energy"),
+
+            fft_mx=float(fft_m[0].item()), fft_my=float(fft_m[1].item()), fft_mz=float(fft_m[2].item()),
+            fft_mz_abs_mean=float(fft_spin_active[:, 2].abs().mean().item()),
+            fft_m_projection=float(fft_projection),
+            fft_winding_abs=_as_float(fft_winding_abs), fft_winding_sum=_as_float(fft_winding_sum),
+
+            unet_mx=float(unet_m[0].item()), unet_my=float(unet_m[1].item()), unet_mz=float(unet_m[2].item()),
+            unet_mz_abs_mean=float(unet_spin_active[:, 2].abs().mean().item()),
+            unet_m_projection=float(unet_projection),
+            unet_winding_abs=_as_float(unet_winding_abs), unet_winding_sum=_as_float(unet_winding_sum),
+
+            hd_mae=hd_error["mae"], hd_rmse=hd_error["rmse"],
+            hd_vector_l2_mean=hd_error["vector_l2_mean"], hd_vector_l2_max=hd_error["vector_l2_max"],
+            hd_relative_rmse=hd_error["relative_rmse"], hd_cosine_mean=hd_error["cosine_mean"],
+            spin_mae=spin_error["mae"], spin_rmse=spin_error["rmse"],
+            spin_vector_l2_mean=spin_error["vector_l2_mean"], spin_vector_l2_max=spin_error["vector_l2_max"],
+            spin_relative_rmse=spin_error["relative_rmse"], spin_cosine_mean=spin_error["cosine_mean"],
+            he_mae=he_error["mae"], ha_mae=ha_error["mae"], heff_mae=heff_error["mae"],
+            m_projection_abs_error=abs(float(unet_projection - fft_projection)),
+
+            fft_iterations=int(fft_iterations), unet_iterations=int(unet_iterations),
+            fft_final_convergence_error=float(fft_final_convergence_error),
+            unet_final_convergence_error=float(unet_final_convergence_error),
+            fft_runtime_seconds=float(fft_runtime_seconds), unet_runtime_seconds=float(unet_runtime_seconds),
         )
+        self.snapshots.append(snapshot)
+        return snapshot
 
-    def save_csv(self, filename):
+    def dataframe(self) -> pd.DataFrame:
+        return pd.DataFrame([asdict(snapshot) for snapshot in self.snapshots])
 
+    def save_csv(self, filename) -> pd.DataFrame:
+        path = Path(filename)
+        path.parent.mkdir(parents=True, exist_ok=True)
         df = self.dataframe()
+        df.to_csv(path, index=False)
+        return df
 
-        df.to_csv(filename, index=False)
+    def predictor_columns(self) -> Sequence[str]:
+        """Return FFT-only scalar predictor columns for Part 2 analysis."""
+        excluded = {
+            "fft_winding_abs", "fft_winding_sum",  # transition labels/definitions
+            "fft_iterations", "fft_final_convergence_error", "fft_runtime_seconds",
+        }
+        return [
+            column for column in self.dataframe().columns
+            if column.startswith("fft_") and column not in excluded
+        ]
 
-        return df 
+    def predictor_dict(self) -> Dict[str, np.ndarray]:
+        df = self.dataframe()
+        return {column: df[column].to_numpy(dtype=float) for column in self.predictor_columns()}
+
+    def target_dict(self) -> Dict[str, np.ndarray]:
+        df = self.dataframe()
+        names = [
+            "hd_mae", "hd_rmse", "hd_vector_l2_mean", "hd_vector_l2_max",
+            "hd_relative_rmse", "spin_mae", "spin_rmse", "spin_vector_l2_mean",
+            "spin_vector_l2_max", "spin_relative_rmse", "m_projection_abs_error",
+        ]
+        return {name: df[name].to_numpy(dtype=float) for name in names if name in df}
+
 
 # ============================================================================
-# MODEL INTROSPECTION
+# MODEL INTROSPECTION (optional debugging helper)
 # ============================================================================
 
 def inspect_model_quantities(model, name_filter=None):
-    """
-    Print every numerical quantity stored on the MAG2305 model, to
-    see what's available to build a candidate predictor from.
-    """
+    """Print numerical quantities currently stored on a MAG2305 model."""
     print("\n" + "=" * 75)
     print(f"{'DISCOVERING AVAILABLE MODEL QUANTITIES':^75}")
     print("=" * 75)
-
     for name in sorted(dir(model)):
-        if name.startswith("_"):
-            continue
-        if name_filter and name_filter.lower() not in name.lower():
+        if name.startswith("_") or (name_filter and name_filter.lower() not in name.lower()):
             continue
         try:
             value = getattr(model, name)
@@ -155,62 +428,16 @@ def inspect_model_quantities(model, name_filter=None):
             continue
         if callable(value):
             continue
-
         if isinstance(value, torch.Tensor):
-            type_str = f"Tensor({value.device})"
-            info_str = f"shape={tuple(value.shape)}"
+            type_str, info_str = f"Tensor({value.device})", f"shape={tuple(value.shape)}"
         elif isinstance(value, np.ndarray):
-            type_str = "ndarray"
-            info_str = f"shape={value.shape}"
+            type_str, info_str = "ndarray", f"shape={value.shape}"
         elif np.isscalar(value):
-            type_str = "scalar"
-            info_str = f"value={value:.4g}" if isinstance(value, (float, np.floating)) else f"value={value}"
+            type_str, info_str = "scalar", f"value={value}"
         else:
-            type_str = type(value).__name__
-            val_str = str(value)
-            info_str = f"value={val_str[:40]}..." if len(val_str) > 40 else f"value={val_str}"
-
+            continue
         print(f"{'name: ' + name:32s} | type: {type_str:15s} | {info_str}")
     print("=" * 75)
-
-
-def extract_candidate_predictors(model):
-    """
-    Automatically extract every scalar (or reducible tensor) quantity from
-    the model as a candidate predictor for this Hext step.
-
-    Returns
-    -------
-    predictors : dict, name -> scalar value at this step
-    """
-    predictors = {}
-
-    for name in sorted(dir(model)):
-        if name.startswith("_"):
-            continue
-        try:
-            value = getattr(model, name)
-        except Exception:
-            continue
-        if callable(value):
-            continue
-
-        if isinstance(value, torch.Tensor):
-            x = value.detach().cpu().numpy()
-            if x.size == 0:
-                continue
-            if x.ndim >= 2:
-                predictors[f"{name}_mean"] = np.mean(x)
-                predictors[f"{name}_std"] = np.std(x)
-                predictors[f"{name}_max"] = np.max(x)
-                predictors[f"{name}_min"] = np.min(x)
-                predictors[f"{name}_rms"] = np.sqrt(np.mean(x**2))
-            else:
-                predictors[name] = np.mean(x)
-        elif np.isscalar(value):
-            predictors[name] = value
-
-    return predictors
 
 
 # ============================================================================
