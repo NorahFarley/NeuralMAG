@@ -872,29 +872,12 @@ class mmModel():
         self.He  : Torch Float(self.size,3)
                    Exchange field distribution
         """
-        self.He  = self.Hx0[0] * ( torch_roll( self.Spin, shift= 1, 
-                                               axis=0, pbc=self.pbc[0] )
-                                 - self.Spin )
-
-        self.He += self.Hx0[1] * ( torch_roll( self.Spin, shift=-1, 
-                                               axis=0, pbc=self.pbc[0] )
-                                 - self.Spin )
-
-        self.He += self.Hx0[2] * ( torch_roll( self.Spin, shift= 1, 
-                                               axis=1, pbc=self.pbc[1] )
-                                 - self.Spin )
-
-        self.He += self.Hx0[3] * ( torch_roll( self.Spin, shift=-1, 
-                                               axis=1, pbc=self.pbc[1] )
-                                 - self.Spin )
-
-        self.He += self.Hx0[4] * ( torch_roll( self.Spin, shift= 1, 
-                                               axis=2, pbc=self.pbc[2] )
-                                 - self.Spin )
-
-        self.He += self.Hx0[5] * ( torch_roll( self.Spin, shift=-1, 
-                                               axis=2, pbc=self.pbc[2] )
-                                 - self.Spin )
+        self.He  = self.Hx0[0] * ( torch_roll( self.Spin, shift= 1, axis=0, pbc=self.pbc[0] )- self.Spin )
+        self.He += self.Hx0[1] * ( torch_roll( self.Spin, shift=-1, axis=0, pbc=self.pbc[0] )- self.Spin )
+        self.He += self.Hx0[2] * ( torch_roll( self.Spin, shift= 1, axis=1, pbc=self.pbc[1] )- self.Spin )
+        self.He += self.Hx0[3] * ( torch_roll( self.Spin, shift=-1, axis=1, pbc=self.pbc[1] )- self.Spin )
+        self.He += self.Hx0[4] * ( torch_roll( self.Spin, shift= 1, axis=2, pbc=self.pbc[2] )- self.Spin )
+        self.He += self.Hx0[5] * ( torch_roll( self.Spin, shift=-1, axis=2, pbc=self.pbc[2] )- self.Spin )
 
         return None
 

@@ -1,193 +1,133 @@
 # -*- coding: utf-8 -*-
 """
-Created on Tue Apr 04 10:00:00 2023
+NeuralMAG M-H evaluation with FFT-ground-truth transition analysis.
+
+The repository's original per-field ``plot_results`` diagnostic is retained.
+Expensive per-LLG-iteration physics-history plots are intentionally removed;
+all Parts 1-5 operate on one converged state per external-field value.
 """
 
-import os
-import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.colors import Normalize
-import matplotlib.colors as colors
+from __future__ import annotations
+
 import argparse
-import torch
-import seaborn as sns
+import os
 import time
-from scipy.stats import linregress
+from pathlib import Path
+from typing import Any, Dict, Sequence, Tuple
 
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+from matplotlib.colors import Normalize
 
+from egs.NMI.MH_evaluate.searcher import (
+    CrossSweepAggregator,
+    LeadingIndicatorAnalyzer,
+    ManuscriptOutputGenerator,
+    PhysicsRecorder,
+    PublicationFigureGenerator,
+    TransitionAnalyzer,
+    analyze_winding_components,
+)
 from libs.misc import Culist, MaskTp, spin_prepare, winding_density
 import libs.MAG2305 as MAG2305
 from libs.Unet import UNet
+from plots import (
+    plot_error_correlations,
+    plot_error_summary,
+    plot_error_vs_transition_proximity,
+    plot_fields_summary,
+    plot_full_energy_summary,
+    plot_performance_summary,
+)
 
 
-
-def load_unet_model(args):
+def load_unet_model(args: argparse.Namespace, device: torch.device) -> Path:
     # load Unet Model
     model = UNet(kc=args.krn, inc=args.layers*3, ouc=args.layers*3).eval().to(device)
-    ckpt = '../ckpt/k{}/{}'.format(args.krn, args.model_name)
-    model.load_state_dict(torch.load(ckpt, map_location=device))
+    checkpoint = '../ckpt/k{}/{}'.format(args.krn, args.model_name)
+    if not checkpoint.is_file():
+        raise FileNotFoundError(f"UNet checkpoint was not found: {checkpoint.resolve()}")
+    state = torch.load(checkpoint, map_location=device)
+    model.load_state_dict(state)
     MAG2305.load_model(model)
-    print('Unet model loaded from {}'.format(ckpt))
+    print(f"UNet model loaded from {checkpoint}")
+    return checkpoint.resolve()
 
-def initialize_models(args):
-    #Initialize MAG2305 models.
-    film1 = MAG2305.mmModel(types='bulk', size=(args.w, args.w, args.layers), cell=(3,3,3), 
-                            Ms=args.Ms, Ax=args.Ax, Ku=args.Ku, Kvec=args.Kvec, 
-                            device="cuda:" + str(args.gpu))
-    
-    film2 = MAG2305.mmModel(types='bulk', size=(args.w, args.w, args.layers), cell=(3,3,3), 
-                            Ms=args.Ms, Ax=args.Ax, Ku=args.Ku, Kvec=args.Kvec, 
-                            device="cuda:" + str(args.gpu))
+def initialize_models(args: argparse.Namespace, device: torch.device):
+    common = dict(types="bulk", size=(args.w, args.w, args.layers), cell=(args.cell_size, args.cell_size, args.cell_size), Ms=args.Ms,
+                  Ax=args.Ax, Ku=args.Ku, Kvec=args.Kvec, device=str(device),)
+    film_fft = MAG2305.mmModel(**common)
+    film_unet = MAG2305.mmModel(**common)
+    print(f"Creating {args.layers} layer models")
+    film_fft.DemagInit()
+    print("FFT demagnetization matrix initialized")
+    checkpoint = load_unet_model(args, device)
+    return film_fft, film_unet, checkpoint
 
-    print('Creating {} layer models \n'.format(args.layers))
-
-    # Initialize demag matrix
-    film1.DemagInit()
-    print('initializing demag matrix \n')
-
-    # load Unet Model
-    load_unet_model(args)
-
-    return film1, film2
-
-def prepare_spin_state(film1, film2, args):
+def prepare_spin_state(film1, film2, args: argparse.Namespace):
     """
     Prepare the initial spin state.
     """
-    # spin_split = np.random.randint(low=2, high=32)
-    # rand_seed  = np.random.randint(low=1000, high=100000)
     spin_split = 8
     rand_seed  = 1234
     spin = spin_prepare(spin_split, film1, rand_seed, mask=args.mask)
     film1.SpinInit(spin)
     film2.SpinInit(spin)
     cell_count = (np.linalg.norm(spin, axis=-1) > 0).sum()
-    return spin_split, rand_seed, cell_count
+    return spin_split, cell_count
 
-def update_spin_fft(model, Hext, Hext_vec, cell_count, args):
+def update_spin_fft(model, Hext: np.ndarray, args: argparse.Namespace):
     """
-    Update the spin state of the model.
-    """
-    error = 1.0
-    itern = 0
-    error_rcd = np.array([])
-    hist_fft = {
-        'hd': [], 'ha': [], 'he': [], 'heff': [], 'm': [], 'mz': [],
-        'e_demag': [], 'e_excha': [], 'e_anis': [], 'e_exter': [], 'e_total': []
-    }
-    h_vec_gpu = torch.tensor(Hext_vec, dtype=torch.float32, device=model.device)
-
-
-    while itern < args.max_iter and error > args.error_min:
-        # FFT_Hd spin update
-        error = model.SpinLLG_RK4(Hext=Hext, dtime=args.dtime, damping=0.1)
-        error_rcd = np.append(error_rcd, error)
-        
-        # track the field magnitude at this iteration
-        # detached and sent to CPU as a single number, not an array
-        he_mag = torch.mean(torch.linalg.norm(model.He, dim=-1)).item()
-        ha_mag = torch.mean(torch.linalg.norm(model.Ha, dim=-1)).item()
-        hd_mag = torch.mean(torch.linalg.norm(model.Hd, dim=-1)).item()
-        heff_mag = torch.mean(torch.linalg.norm(model.Heff, dim=-1)).item()
-
-        spin_sum = torch.sum(model.Spin, dim=(0, 1, 2))
-        m_proj = torch.dot(spin_sum, h_vec_gpu).item() / cell_count
-        mz_abs_avg = torch.mean(torch.abs(model.Spin[..., 2])).item()
-
-        #model.GetEnergy_detailed(Hext=Hext)
-
-        hist_fft['hd'].append(hd_mag)
-        hist_fft['ha'].append(ha_mag)
-        hist_fft['he'].append(he_mag)
-        hist_fft['heff'].append(heff_mag)
-        hist_fft['m'].append(m_proj)
-        hist_fft['mz'].append(mz_abs_avg)
-        # hist_fft['e_demag'].append(model.Energy_demag.item())
-        # hist_fft['e_excha'].append(model.Energy_excha.item())
-        # hist_fft['e_anis'].append(model.Energy_aniso.item() if hasattr(model, 'Energy_aniso') else 0.0)
-        # hist_fft['e_exter'].append(model.Energy_exter.item())
-        # hist_fft['e_total'].append(model.Energy.item())
-
-        # Print iteration info
-        if error <= args.error_min or itern % 1000 == 0:  # Adjust the frequency of printing as needed
-            print(f'Iteration: {itern} \n'
-                  f'Error_converge FFT: {error:.2e}')
-        itern += 1
-
-    return error_rcd, itern, hist_fft
-
-def update_spin_unet(model, Hext, Hext_vec, cell_count, args):
-    """
-    Update the spin state of the model.
+    Update the spin state of the FFT model and retain only the convergence-error trajectory.
     """
     error = 1.0
-    itern = 0
-    error_fluc = 1.0
-    error_rcd = np.array([])
-    hist_un = {
-        'hd': [], 'ha': [], 'he': [], 'heff': [], 'm': [], 'mz': [],
-        'e_demag': [], 'e_excha': [], 'e_anis': [], 'e_exter': [], 'e_total': []
-    }
-    h_vec_gpu = torch.tensor(Hext_vec, dtype=torch.float32, device=model.device)
+    iteration = 0
+    error_record = []
+    while iteration < args.max_iter and error > args.error_min:
+        error = model.SpinLLG_RK4(Hext=Hext, dtime=args.dtime, damping=args.damping)
+        error_record.append(float(error))
+        if error <= args.error_min or iteration % 1000 == 0:
+            print(f"Iteration: {iteration}\nError_converge FFT: {error:.2e}")
+        iteration += 1
+    return np.asarray(error_record, dtype=float), iteration
 
-    while itern < args.max_iter and error > args.error_min:
-        # Unet_Hd spin update
-        error = model.SpinLLG_RK4_unetHd(Hext=Hext, dtime=args.dtime, damping=0.1)
-        error_rcd = np.append(error_rcd, error)
-
-        # track the field magnitude at this iteration
-        # detached and sent to CPU as a single number, not an array
-        he_mag = torch.mean(torch.linalg.norm(model.He, dim=-1)).item()
-        ha_mag = torch.mean(torch.linalg.norm(model.Ha, dim=-1)).item()
-        hd_mag = torch.mean(torch.linalg.norm(model.Hd, dim=-1)).item()
-        heff_mag = torch.mean(torch.linalg.norm(model.Heff, dim=-1)).item()
-
-        spin_sum = torch.sum(model.Spin, dim=(0, 1, 2))
-        m_proj = torch.dot(spin_sum, h_vec_gpu).item() / cell_count
-        mz_abs_avg = torch.mean(torch.abs(model.Spin[..., 2])).item()
-
-        # model.GetEnergy_detailed(Hext=Hext)
-
-        hist_un['hd'].append(hd_mag)
-        hist_un['ha'].append(ha_mag)
-        hist_un['he'].append(he_mag)
-        hist_un['heff'].append(heff_mag)
-        hist_un['m'].append(m_proj)
-        hist_un['mz'].append(mz_abs_avg)
-        # hist_un['e_demag'].append(model.Energy_demag.item())
-        # hist_un['e_excha'].append(model.Energy_excha.item())
-        # hist_un['e_anis'].append(model.Energy_aniso.item() if hasattr(model, 'Energy_aniso') else 0.0)
-        # hist_un['e_exter'].append(model.Energy_exter.item())
-        # hist_un['e_total'].append(model.Energy.item())
-        
-        # fluctation error break condition
-        if itern > 20000:
-            error_fluc = np.abs(error_rcd[-2000:].mean() - error_rcd[-500:].mean()) / error_rcd[-2000:].mean()
-            if error_fluc < 0.02 and error < 1.0e-4:
-                print('Unet error not decreasing! Break.')
+def update_spin_unet(model, Hext: np.ndarray, args: argparse.Namespace):
+    """Relax the UNet-driven model and retain only convergence diagnostics."""
+    error = 1.0
+    iteration = 0
+    error_record = []
+    while iteration < args.max_iter and error > args.error_min:
+        error = model.SpinLLG_RK4_unetHd(Hext=Hext, dtime=args.dtime, damping=args.damping)
+        error_record.append(float(error))
+        if iteration > args.unet_stagnation_start and len(error_record) >= args.unet_stagnation_long_window:
+            long_mean = float(np.mean(error_record[-args.unet_stagnation_long_window:]))
+            short_mean = float(np.mean(error_record[-args.unet_stagnation_short_window:]))
+            fluctuation = abs(long_mean - short_mean) / max(abs(long_mean), 1.0e-30)
+            if fluctuation < args.unet_stagnation_fraction and error < args.unet_stagnation_error:
+                print("UNet convergence error has stagnated; ending this field relaxation.")
                 break
-        # Print iteration info
-        if error <= args.error_min or itern % 1000 == 0:  # Adjust the frequency of printing as needed
-            print(f'Iteration: {itern} \n'
-                  f'Error_converge UNet: {error:.2e}')
-        itern += 1
+        if error <= args.error_min or iteration % 1000 == 0:
+            print(f"Iteration: {iteration}\nError_converge UNet: {error:.2e}")
+        iteration += 1
+    return np.asarray(error_record, dtype=float), iteration
 
-    return error_rcd, itern, hist_un
 
-def plot_results():
+def _mean_field_magnitude(field: torch.Tensor, spin: torch.Tensor) -> float:
+    active = torch.linalg.vector_norm(spin, dim=-1) > 1.0e-12
+    magnitude = torch.linalg.vector_norm(field, dim=-1)
+    selected = magnitude[active]
+    return float(selected.mean().item()) if selected.numel() else float(magnitude.mean().item())
+
+
+def plot_results(nloop, spin_mm, spin_un, itern1, itern2, Hd_mm, Hd_un, x_plot, y1_plot, y2_plot, Hext_range, 
+                 error1_rcd, error2_rcd, save_path_iteration, general_title_iteration):
     """
     Plot and save the results.
     """
     fig, axs = plt.subplots(2, 4, figsize=(20, 10))
-    title_text = (
-        f"Film Layers: {args.layers} | Grid Size: {args.w}x{args.w} | Split: {spin_split} | Seed: {rand_seed}\n"
-        f"Material Properties ── $M_s$: {args.Ms} emu/cc | $A_x$: {args.Ax} pJ/m | $K_u$: {args.Ku} $J/m^3$\n"
-        f"Loop: {nloop} | $H_{{ext}}$ = {Hext_val:.1f} Oe\n"
-    )
 
-    fig.suptitle(title_text, fontsize=13, fontweight='bold')
-    # fig.suptitle('{} layers film size:{}_split{}_seed{}_Ms{}_Ax{}_Ku{}\n \nloop:{} , Hext={}'.format(args.layers, args.w, spin_split, 
-    # rand_seed, args.Ms, args.Ax, args.Ku, nloop, Hext), fontsize=18 )
+    fig.suptitle(general_title_iteration, fontsize=13, fontweight='bold')
     
     # Plot spin-mm RGB figures
     spin = (spin_mm + 1)/2
@@ -255,853 +195,319 @@ def plot_results():
     
     # save img
     plt.tight_layout()
-    plt.savefig(filename+'loop_{}.png'.format(nloop))
+    plt.savefig(os.path.join(save_path_iteration, f'loop_{nloop}.png'), dpi=300)
     plt.close()
 
-def plot_iteration_domain_walls(film1, film2, base_path, nloop, Hext_val, args, spin_split, rand_seed, itern1, itern2, err_fft, err_un):
-    """
-    Generates a 2x2 multi-panel spatial and quantitative analysis sheet comparing 
-    domain wall layouts with locked color scales, 1D line cuts, and metadata.
-    """
-    # Automatically generates a separate, dedicated folder for this plot type
-    dw_folder = os.path.join(base_path, "domain_walls_spatial")
-    os.makedirs(dw_folder, exist_ok=True)
-    
-    # Isolate domain wall profiles by computing local exchange field vector magnitudes (Layer 0)
-    dw_mm = np.linalg.norm(film1.He.detach().cpu().numpy()[:, :, 0, :], axis=-1)
-    dw_un = np.linalg.norm(film2.He.detach().cpu().numpy()[:, :, 0, :], axis=-1)
-    dw_diff = np.abs(dw_mm - dw_un)
-    
-    # Extract a 1D cross-section cut across the center row of the film
-    mid_row = dw_mm.shape[0] // 2
-    line_mm = dw_mm[mid_row, :]
-    line_un = dw_un[mid_row, :]
-    
-    fig, axs = plt.subplots(2, 2, figsize=(15, 13))
-    
-    
-    title_text = (
-        f"Film Layers: {args.layers} | Grid Size: {args.w}x{args.w} | Split: {spin_split} | Seed: {rand_seed}\n"
-        f"Material Properties ── $M_s$: {args.Ms} emu/cc | $A_x$: {args.Ax} pJ/m | $K_u$: {args.Ku} $J/m^3$\n"
-    )
-    
-    fig.suptitle("Domain Wall Position Graphs\n\n" + title_text, fontsize=13, fontweight="bold")
-    
 
-    # Find the global maximum exchange intensity between both models
-    global_vmax = max(np.max(dw_mm), np.max(dw_un))
-    global_vmin = 0.0
-    
-    # Panel 1: FFT Ground Truth Heatmap
-    im0 = axs[0, 0].imshow(dw_mm, cmap='viridis', origin='lower', vmin=global_vmin, vmax=global_vmax)
-    axs[0, 0].set_title('FFT Solver (mm) Domain Wall Spatial Map', fontsize=11, fontweight='bold')
-    axs[0, 0].set_xlabel('x [nm]', fontsize=9)
-    axs[0, 0].set_ylabel('y [nm]', fontsize=9)
-    fig.colorbar(im0, ax=axs[0, 0], label='Exchange Intensity [Oe]')
-    
-    # Panel 2: UNet Prediction Heatmap (Locked to identical color scales as FFT)
-    im1 = axs[0, 1].imshow(dw_un, cmap='viridis', origin='lower', vmin=global_vmin, vmax=global_vmax)
-    axs[0, 1].set_title('UNet Model (un) Domain Wall Spatial Map', fontsize=11, fontweight='bold')
-    axs[0, 1].set_xlabel('x [nm]', fontsize=9)
-    axs[0, 1].set_ylabel('y [nm]', fontsize=9)
-    fig.colorbar(im1, ax=axs[0, 1], label='Exchange Intensity [Oe]')
-    
-    # Panel 3: Spatial Difference Heatmap
-    im2 = axs[1, 0].imshow(dw_diff, cmap='hot', origin='lower', vmin=0.0)
-    axs[1, 0].set_title('Domain Tracking Spatial Difference', fontsize=11, fontweight='bold')
-    axs[1, 0].set_xlabel('x [nm]', fontsize=9)
-    axs[1, 0].set_ylabel('y [nm]', fontsize=9)
-    fig.colorbar(im2, ax=axs[1, 0], label='Absolute Deviation [Oe]')
-    
-    # Panel 4: 1D Line Cut Cross-Section Graph with Tailored Padding Limits
-    axs[1, 1].plot(line_mm, color='blue', lw=2, linestyle='-', label='FFT Solver Cut')
-    axs[1, 1].plot(line_un, color='red', lw=2, linestyle='-', label='UNet Model Cut')
-    
-    # padding for the line graph axis limits
-    line_max = max(np.max(line_mm), np.max(line_un))
-    line_min = min(np.min(line_mm), np.min(line_un))
-    line_range = line_max - line_min if line_max != line_min else 1.0
-    
-    line_ymax_padded = line_max + (line_range * 0.05)
-    line_ymin_padded = -0.05 * line_max if line_min == 0.0 else line_min - (line_range * 0.05)
-    line_xmax_padded = len(line_mm) * 1.05
-    
-    axs[1, 1].set_title(f'Domain Wall Profile Cut (Row Y = {mid_row})', fontsize=11, fontweight='bold')
-    axs[1, 1].set_xlabel('Spatial Coordinate X [Cell Index]', fontsize=9)
-    axs[1, 1].set_ylabel('Local Exchange Intensity [Oe]', fontsize=9)
-    axs[1, 1].set_xlim(0, line_xmax_padded)
-    axs[1, 1].set_ylim(line_ymin_padded, line_ymax_padded)
-    axs[1, 1].grid(True, linestyle='--', alpha=0.4)
-    axs[1, 1].legend(loc='upper right', fontsize=9)
-    
-    plt.tight_layout()
-    plt.savefig(os.path.join(dw_folder, f'spatial_dw_loop_{nloop}.png'), dpi=150)
-    plt.close()
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="NeuralMAG M-H evaluation and transition analysis")
+    parser.add_argument('--gpu', type=int, default=0)
+    parser.add_argument('--krn', type=int, default=16)
+    parser.add_argument('--w', type=int, default=32)
+    parser.add_argument('--layers', type=int, default=2)
+    parser.add_argument('--cell_size', type=float, default=3.0, help='Cubic cell size in nm')
+    parser.add_argument('--Ms', type=float, default=1000)
+    parser.add_argument('--Ax', type=float, default=0.5e-6)
+    parser.add_argument('--Ku', type=float, default=0.0)
+    parser.add_argument('--Kvec', type=Culist, default=(0, 0, 1))
+    parser.add_argument('--damping', type=float, default=0.1)
+    parser.add_argument('--dtime', type=float, default=1.0e-13)
+    parser.add_argument('--error_min', type=float, default=1.0e-5)
+    parser.add_argument('--max_iter', type=int, default=100000)
+    parser.add_argument('--mask', type=MaskTp, default=False)
+    parser.add_argument('--loss_type', type=str, default='baseline')
+    parser.add_argument('--model_name', type=str, default='model.pt')
+    parser.add_argument('--spin_split', type=int, default=8)
+    parser.add_argument('--rand_seed', type=int, default=1234)
+    parser.add_argument('--hext_start', type=float, default=1000.0)
+    parser.add_argument('--hext_end', type=float, default=-1000.0)
+    parser.add_argument('--hext_steps', type=int, default=201)
+    parser.add_argument('--field_angle_radians', type=float, default=0.01)
 
-def plot_iteration_fields(hist_fft, hist_un, base_path, nloop, Hext_val, args, 
-                         spin_split, rand_seed, itern1, itern2, err_fft, err_un):
-    """
-    Generates a 2x2 multi-panel line graph mapping every field variable 
-    trajectory iteration-by-iteration for explicit path tracking.
-    """
+    parser.add_argument('--unet_stagnation_start', type=int, default=20000)
+    parser.add_argument('--unet_stagnation_long_window', type=int, default=2000)
+    parser.add_argument('--unet_stagnation_short_window', type=int, default=500)
+    parser.add_argument('--unet_stagnation_fraction', type=float, default=0.02)
+    parser.add_argument('--unet_stagnation_error', type=float, default=1.0e-4)
 
-    # Create the dedicated subfolder
-    iter_folder = os.path.join(base_path, "iteration_error_plots")
-    os.makedirs(iter_folder, exist_ok=True)
-    fig, axs = plt.subplots(3, 2, figsize=(15, 15))
-    
-    title_text = (
-        f"Film Layers: {args.layers} | Grid Size: {args.w}x{args.w} | Split: {spin_split} | Seed: {rand_seed}\n"
-        f"Material Properties ── $M_s$: {args.Ms} emu/cc | $A_x$: {args.Ax} pJ/m | $K_u$: {args.Ku} $J/m^3$\n"
-        f"Target Threshold ($\Delta m_{{min}}$): {args.error_min:.2e}\n"
-        f"FFT Steps: {itern1} (Final Err: {err_fft:.2e}) | UNet Steps: {itern2} (Final Err: {err_un:.2e})\n"
-    )
-    # fig.suptitle(title_text, fontsize=13, fontweight='bold')
-    # fig.suptitle(f'Field Component Convergence Trajectories | Hext = {Hext_val:.1f} Oe (Loop {nloop})', fontsize=14, fontweight='bold')
-    fig.suptitle("Field Component Convergence Trajectories\n\n"+ title_text, fontsize=13, fontweight="bold")
+    parser.add_argument('--core_relative_threshold', type=float, default=0.25)
+    parser.add_argument('--core_absolute_threshold', type=float, default=0.02)
+    parser.add_argument('--core_min_cells', type=int, default=1)
+    parser.add_argument('--core_min_abs_charge', type=float, default=0.05)
 
-    # field axis scaling (Applies to Panels 1-4)
-    all_field_values = (hist_fft['hd'] + hist_fft['ha'] + hist_fft['he'] + hist_fft['heff'] +
-                        hist_un['hd'] + hist_un['ha'] + hist_un['he'] + hist_un['heff'])
-    
-    min_field = min(all_field_values)
-    max_field = max(all_field_values)
-    field_range = max_field - min_field if max_field != min_field else 1.0
-    
-    global_ymax = max_field + (field_range * 0.05)
-    global_ymin = -0.05 * max_field if min_field == 0.0 and max_field != 0.0 else min_field - (field_range * 0.05)
-    
-    global_xmax = max(len(hist_fft['hd']), len(hist_un['hd']))
-    global_xmax_padded = global_xmax * 1.05
+    parser.add_argument('--transition_merge_gap', type=int, default=1)
+    parser.add_argument('--transition_winding_tolerance', type=float, default=0.0)
+    parser.add_argument('--transition_m_z_threshold', type=float, default=3.0)
+    parser.add_argument('--transition_min_m_change', type=float, default=0.02)
 
-    m_title = f'Magnetization State ($M_{{ext}}/M_s$)\nFinal ── FFT: {hist_fft["m"][-1]:.3f} | UNet: {hist_un["m"][-1]:.3f}'
-    mz_title = f'Out-of-Plane Component ($|M_z|$)\nFinal ── FFT: {hist_fft["mz"][-1]:.3f} | UNet: {hist_un["mz"][-1]:.3f}'
-    
-    # Map tracking parameters to grid slots
-    plot_map = [
-        ('hd', 'Demagnetizing Field ($H_{demag}$)', 'Mean Demagnetizing Field [Oe]', axs[0, 0], 'field'),
-        ('ha', 'Anisotropy Field ($H_{anis}$)', 'Mean Anisotropy Field [Oe]', axs[0, 1], 'field'),
-        ('he', 'Exchange Field ($H_{ex}$)', 'Mean Exchange Field [Oe]', axs[1, 0], 'field'),
-        ('heff', 'Total Effective Field ($H_{eff}$)', 'Mean Effective Field [Oe]', axs[1, 1], 'field'),
-        ('m', m_title, 'Projected Magnetization $M_{ext}/M_s$', axs[2, 0], 'm_axis'),
-        ('mz', mz_title, 'Mean Out-of-Plane Magnetization Magnitude $|M_z|$', axs[2, 1], 'mz_axis')
-    ]
-    
-    for key, panel_title, y_label, ax, scale_type in plot_map:
-        ax.plot(hist_fft[key], color='blue', lw=2, linestyle='-', label='FFT Solver Path')
-        ax.plot(hist_un[key], color='red', lw=2, linestyle='-', label='UNet Model Path')
-        
-        ax.set_title(panel_title, fontsize=11, fontweight='bold')
-        ax.set_xlabel('Internal Solver Step (Iteration)', fontsize=9)
-        ax.set_ylabel(y_label, fontsize=9)
-        ax.set_xlim(0, global_xmax_padded)
-        
-        if scale_type == 'field':
-            ax.set_ylim(global_ymin, global_ymax)
-        elif scale_type == 'm_axis':
-            ax.set_ylim(-1.1, 1.1)
-        elif scale_type == 'mz_axis':
-            ax.set_ylim(-0.05, 1.1)
-        
-    plt.tight_layout()
-    plt.savefig(os.path.join(iter_folder, f'iteration_trajectory_loop_{nloop}.png'), dpi=150)
-    plt.close()
+    parser.add_argument('--indicator_primary_window', type=int, default=10, choices=(3, 5, 10, 20))
+    parser.add_argument('--indicator_max_lag', type=int, default=20)
+    parser.add_argument('--indicator_lead_z_threshold', type=float, default=1.5)
+    parser.add_argument('--indicator_post_event_exclusion', type=int, default=3)
+    parser.add_argument('--indicator_permutations', type=int, default=500)
+    parser.add_argument('--indicator_bootstrap', type=int, default=500)
+    parser.add_argument('--indicator_top_n', type=int, default=12)
+    parser.add_argument('--indicator_random_seed', type=int, default=1234)
 
-def plot_iteration_winding_density(film1, film2, base_path, nloop, Hext_val, args, spin_split, rand_seed, itern1, itern2, err_fft, err_un):
-    """
-    Generates a 2x2 multi-panel spatial and quantitative topological chart 
-    comparing vortex core winding densities with symmetric scales.
-    """
-    # Create a dedicated separate subfolder for this plot classification
-    topo_folder = os.path.join(base_path, "winding_density_spatial")
-    os.makedirs(topo_folder, exist_ok=True)
-    
+    parser.add_argument('--publication_top_n', type=int, default=4)
+    parser.add_argument('--publication_pre_steps', type=int, default=20)
+    parser.add_argument('--publication_post_steps', type=int, default=10)
+    parser.add_argument('--publication_dpi', type=int, default=300)
+    parser.add_argument('--publication_formats', type=str, default='png,pdf')
 
-    # Reshape spin arrays to channel-first format with batch dimension [1, 3, W, W] for layer 0
-    spin_fft_tensor = film1.Spin.permute(3, 0, 1, 2)[:, :, :, 0].unsqueeze(0)
-    spin_un_tensor  = film2.Spin.permute(3, 0, 1, 2)[:, :, :, 0].unsqueeze(0)
-    
-    # Run the built-in micromagnetic winding density analyzer
-    topo_fft_raw, winding_abs_fft, _ = winding_density(spin_fft_tensor)
-    topo_un_raw,  winding_abs_un,  _ = winding_density(spin_un_tensor)
-    
-    # Squeeze down to standard 2D numpy matrices for plotting
-    topo_fft = topo_fft_raw.squeeze().detach().cpu().numpy()
-    topo_un  = topo_un_raw.squeeze().detach().cpu().numpy()
-    topo_diff = np.abs(topo_fft - topo_un)
-    
-    # Extract 1D cross-section data through the horizontal center row
-    mid_row = topo_fft.shape[0] // 2
-    line_fft = topo_fft[mid_row, :]
-    line_un  = topo_un[mid_row, :]
-    
-    fig, axs = plt.subplots(2, 2, figsize=(15, 13))
-    
-    title_text = (
-        f"Film Layers: {args.layers} | Grid Size: {args.w}x{args.w} | Split: {spin_split} | Seed: {rand_seed}\n"
-        f"Material Properties ── $M_s$: {args.Ms} emu/cc | $A_x$: {args.Ax} pJ/m | $K_u$: {args.Ku} $J/m^3$\n"
-        f"Loop: {nloop} | $H_{{ext}}$ = {Hext_val:.1f} Oe | Target Threshold ($\Delta m_{{min}}$): {args.error_min:.2e}\n"
-    )
-    fig.suptitle(title_text, fontsize=13, fontweight='bold')
-    
-    # Dynamically scales to the highest peak but keeps the bounds symmetrical around zero
-    max_charge = max(np.max(np.abs(topo_fft)), np.max(np.abs(topo_un)))
-    global_vmax = max_charge if max_charge > 1e-8 else 1.0
-    global_vmin = -global_vmax
+    parser.add_argument('--manuscript_top_n', type=int, default=10)
+    parser.add_argument('--manuscript_formats', type=str, default='csv,tex,md')
+    parser.add_argument('--run_label', type=str, default='')
+    parser.add_argument('--aggregate_root', type=str, default='')
+    parser.add_argument('--aggregate_output', type=str, default='')
+    parser.add_argument('--aggregate_min_runs', type=int, default=2)
 
-    # linthresh controls the linear region around 0. Anything smaller than this stays linear.
-    norm = colors.SymLogNorm(linthresh=max_charge*0.02, vmin=global_vmin, vmax=global_vmax, base=10)
+    parser.add_argument('--skip_original_plots', action='store_true')
+    parser.add_argument('--skip_summary_plots', action='store_true')
+    parser.add_argument('--skip_parts_2_to_5', action='store_true')
+    return parser
 
-    # Panel 1: FFT Ground Truth Topological Heatmap
-    im0 = axs[0, 0].imshow(topo_fft, cmap='PuOr', origin='lower', norm=norm)
-    axs[0, 0].set_title(f'FFT Solver Topological Charge Map\nTotal Absolute Vortices: {winding_abs_fft:.1f}', fontsize=11, fontweight='bold')
-    axs[0, 0].set_xlabel('x [nm]', fontsize=9)
-    axs[0, 0].set_ylabel('y [nm]', fontsize=9)
-    fig.colorbar(im0, ax=axs[0, 0], label='Local Topological Charge Density')
-    
-    # Panel 2: UNet Framework Topological Heatmap (Locked to identical bounds)
-    im1 = axs[0, 1].imshow(topo_un, cmap='PuOr', origin='lower', norm=norm)
-    axs[0, 1].set_title(f'UNet Model Topological Charge Map\nTotal Absolute Vortices: {winding_abs_un:.1f}', fontsize=11, fontweight='bold')
-    axs[0, 1].set_xlabel('x [nm]', fontsize=9)
-    axs[0, 1].set_ylabel('y [nm]', fontsize=9)
-    fig.colorbar(im1, ax=axs[0, 1], label='Local Topological Charge Density')
-    
-    # Panel 3: Spatial Tracking Difference Map
-    im2 = axs[1, 0].imshow(topo_diff, cmap='hot', origin='lower', vmin=0.0)
-    axs[1, 0].set_title('Absolute Tracking Topological Difference', fontsize=11, fontweight='bold')
-    axs[1, 0].set_xlabel('x [nm]', fontsize=9)
-    axs[1, 0].set_ylabel('y [nm]', fontsize=9)
-    fig.colorbar(im2, ax=axs[1, 0], label='Absolute Deviation')
-    
-    #  Panel 4: 1D Line Cut Cross-Section Graph with Proportional 5% Margin Padding
-    axs[1, 1].plot(line_fft, color='blue', lw=2, linestyle='-', label='FFT Core Cut')
-    axs[1, 1].plot(line_un, color='red', lw=2, linestyle='-', label='UNet Core Cut')
-    
-    # Calculate tailored 5% padding configuration limits
-    line_max = max(np.max(line_fft), np.max(line_un))
-    line_min = min(np.min(line_fft), np.min(line_un))
-    line_range = line_max - line_min if line_max != line_min else 1.0
-    
-    line_ymax_padded = line_max + (line_range * 0.05)
-    line_ymin_padded = line_min - (line_range * 0.05)
-    line_xmax_padded = len(line_fft) * 1.05
-    
-    axs[1, 1].set_title(f'Topological Core Profile Cut (Row Y = {mid_row})', fontsize=11, fontweight='bold')
-    axs[1, 1].set_xlabel('Spatial Coordinate X [Cell Index]', fontsize=9)
-    axs[1, 1].set_ylabel('Topological Winding Value', fontsize=9)
-    axs[1, 1].set_xlim(0, line_xmax_padded)
-    axs[1, 1].set_ylim(line_ymin_padded, line_ymax_padded)
-    axs[1, 1].grid(True, linestyle='--', alpha=0.4)
-    axs[1, 1].legend(loc='upper right', fontsize=9)
-    
-    plt.tight_layout()
-    plt.savefig(os.path.join(topo_folder, f'spatial_topology_loop_{nloop}.png'), dpi=150)
-    plt.close()
 
-def plot_iteration_energy(hist_fft, hist_un, base_path, nloop, Hext_val, args, spin_split, rand_seed, itern1, itern2, err_fft, err_un):
-    """
-    Generates a 2x2 multi-panel line graph mapping individual energy component 
-    relaxation curves iteration-by-iteration with tailored 5% boundary padding.
-    """
-    iter_energy_folder = os.path.join(base_path, "iteration_energy")
-    os.makedirs(iter_energy_folder, exist_ok=True)
-    
-    fig, axs = plt.subplots(2, 2, figsize=(15, 11))
-    
-    title_text = (
-        f"Film Layers: {args.layers} | Grid Size: {args.w}x{args.w} | Split: {spin_split} | Seed: {rand_seed}\n"
-        f"Material Properties ── $M_s$: {args.Ms} emu/cc | $A_x$: {args.Ax} pJ/m | $K_u$: {args.Ku} $J/m^3$\n"
-        f"Loop: {nloop} | $H_{{ext}}$ = {Hext_val:.1f} Oe | Target Threshold ($\Delta m_{{min}}$): {args.error_min:.2e}\n"
-    )
-    fig.suptitle(title_text, fontsize=13, fontweight='bold')
-    
-    global_xmax_padded = max(len(hist_fft['e_demag']), len(hist_un['e_demag'])) * 1.05
-    
-    plot_map = [
-        ('e_demag', 'Demagnetizing Energy ($E_{demag}$)', 'Energy [Joules]', axs[0, 0]),
-        ('e_anis', 'Anisotropy Energy ($E_{anis}$)', 'Energy [Joules]', axs[0, 1]),
-        ('e_excha', 'Exchange Energy ($E_{excha}$)', 'Energy [Joules]', axs[1, 0]),
-        ('e_exter', 'Exter Energy ($E_{exter}$)', 'Energy [Joules]', axs[1, 1])
-    ]
-    
-    for key, panel_title, y_label, ax in plot_map:
-        ax.plot(hist_fft[key], color='blue', lw=2, linestyle='-', label='FFT Solver Path')
-        ax.plot(hist_un[key], color='red', lw=2, linestyle='-', label='UNet Model Path')
-        
-        ax.set_title(panel_title, fontsize=11, fontweight='bold')
-        ax.set_xlabel('Internal Solver Step (Iteration)', fontsize=10)
-        ax.set_ylabel(y_label, fontsize=10)
-        
-        # Calculate Proportional 5% padding dynamically per panel to handle scale differences
-        combined_vals = hist_fft[key] + hist_un[key]
-        if len(combined_vals) > 0:
-            max_v, min_v = max(combined_vals), min(combined_vals)
-            v_range = max_v - min_v if max_v != min_v else 1.0
-            ymax = max_v + (v_range * 0.05)
-            ymin = -0.05 * max_v if min_v == 0.0 and max_v != 0.0 else min_v - (v_range * 0.05)
-            ax.set_ylim(ymin, ymax)
-            
-        ax.set_xlim(0, global_xmax_padded)
-        ax.grid(True, linestyle='--', alpha=0.4)
-        ax.legend(loc='upper right', fontsize=9)
-        
-    plt.tight_layout()
-    plt.savefig(os.path.join(iter_energy_folder, f'iteration_energy_loop_{nloop}.png'), dpi=150)
-    plt.close()
+def main() -> None:
+    args = build_parser().parse_args()
+    if args.hext_steps < 2:
+        raise ValueError('--hext_steps must be at least 2.')
+    device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
+    film_fft, film_unet, checkpoint_path = initialize_models(args, device)
+    initial_spin, cell_count = prepare_spin_state(film_fft, film_unet, args)
 
-    fig_tot, ax_tot = plt.subplots(figsize=(9, 6))
-    fig_tot.suptitle(title_text, fontsize=11, fontweight='bold')
-    
-    ax_tot.plot(hist_fft['e_total'], color='blue', lw=2.5, linestyle='-', label='FFT Solver Path')
-    ax_tot.plot(hist_un['e_total'], color='red', lw=2.5, linestyle='-', label='UNet Model Path')
-    
-    ax_tot.set_title('Total Effective Field Energy ($E_{total}$)', fontsize=12, fontweight='bold')
-    ax_tot.set_xlabel('Internal Solver Step (Iteration)', fontsize=11)
-    ax_tot.set_ylabel('Total Energy [Joules]', fontsize=11) 
-    
-    combined_tot = hist_fft['e_total'] + hist_un['e_total']
-    if len(combined_tot) > 0:
-        max_v, min_v = max(combined_tot), min(combined_tot)
-        v_range = max_v - min_v if max_v != min_v else 1.0
-        ax_tot.set_ylim(min_v - (v_range * 0.05), max_v + (v_range * 0.05))
-        
-    ax_tot.set_xlim(0, global_xmax_padded)
-    ax_tot.grid(True, linestyle='--', alpha=0.4)
-    ax_tot.legend(loc='upper right', fontsize=10)
-    
-    plt.tight_layout()
-    fig_tot.subplots_adjust(top=0.85)
-    plt.savefig(os.path.join(iter_energy_folder, f'iteration_total_energy_loop_{nloop}.png'), dpi=150)
-    plt.close()
+    output_dir = Path(f"./figs_k{args.krn}/model_{args.loss_type}/shape_{args.mask}/"
+                      f"size{args.w}_Ms{args.Ms}_Ax{args.Ax}_Ku{args.Ku}_dtime{args.dtime}_"
+                      f"split{args.spin_split}_seed{args.rand_seed}_Layers{args.layers}/")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    summary_dir = output_dir / "summary_plots"
+    summary_dir.mkdir(parents=True, exist_ok=True)
+    original_plot_dir = output_dir / "original_iteration_plots"
+    if not args.skip_original_plots:
+        original_plot_dir.mkdir(parents=True, exist_ok=True)
+        hext_range = np.linspace(args.hext_start, args.hext_end, args.hext_steps)
+    sweep_direction = np.array([np.cos(args.field_angle_radians), np.sin(args.field_angle_radians), 0.0,], dtype=float)
 
-def plot_full_energy_summary(full_data_fft, full_data_un, Hext_range, base_path, args, spin_split, rand_seed):
-    """
-    Generates a final 2x2 multi-panel graph charting equilibrium energy components 
-    across the entire completed external field sweep loop range.
-    """
-    full_energy_folder = os.path.join(base_path, "summary_plots")
-    os.makedirs(full_energy_folder, exist_ok=True)
-    
-    fig, axs = plt.subplots(2, 2, figsize=(15, 11))
-    
-    title_text = (
-        f"Film Layers: {args.layers} | Grid Size: {args.w}x{args.w} | Split: {spin_split} | Seed: {rand_seed}\n"
-        f"Material Properties ── $M_s$: {args.Ms} emu/cc | $A_x$: {args.Ax} pJ/m | $K_u$: {args.Ku} $J/m^3$\n"
-    )
-    fig.suptitle(title_text, fontsize=13, fontweight='bold')
-    
-    # Calculate uniform X-axis padding based on external field bounds
-    max_h, min_h = max(Hext_range), min(Hext_range)
-    h_range = max_h - min_h
-    xmax_padded = max_h + (h_range * 0.05)
-    xmin_padded = min_h - (h_range * 0.05)
-    
-    plot_map = [
-        ('demag', 'Equilibrium Demagnetizing Energy ($E_{demag}$)', axs[0, 0]),
-        ('anis', 'Equilibrium Anisotropy Energy ($E_{anis}$)', axs[0, 1]),
-        ('excha', 'Equilibrium Exchange Energy ($E_{excha}$)', axs[1, 0]),
-        ('exter', 'Equilibrium exter Energy ($E_{exter}$)', axs[1, 1])
-    ]
-    
-    for key, panel_title, ax in plot_map:
-        # Plot full profiles against the external field tracking array
-        ax.plot(Hext_range, full_data_fft[key], color='blue', lw=2, linestyle='-', label='FFT Engine Profile')
-        ax.plot(Hext_range, full_data_un[key], color='red', lw=2, linestyle='-', label='UNet Model Profile')
-        
-        ax.set_title(panel_title, fontsize=11, fontweight='bold')
-        ax.set_xlabel('External Field $H_{ext}$ [Oe]', fontsize=10)
-        ax.set_ylabel('Energy [Joules]', fontsize=10)
-        
-        combined_vals = list(full_data_fft[key]) + list(full_data_un[key])
-        if len(combined_vals) > 0:
-            max_v, min_v = max(combined_vals), min(combined_vals)
-            v_range = max_v - min_v if max_v != min_v else 1.0
-            ymax = max_v + (v_range * 0.05)
-            ymin = -0.05 * max_v if min_v == 0.0 and max_v != 0.0 else min_v - (v_range * 0.05)
-            ax.set_ylim(ymin, ymax)
-            
-        ax.set_xlim(xmax_padded, xmin_padded) # Keeps standard reversing sweep profile view orientation
-        ax.grid(True, linestyle='--', alpha=0.4)
-        ax.legend(loc='upper right', fontsize=9)
-        
-    plt.tight_layout()
-    plt.savefig(os.path.join(full_energy_folder, 'full_equilibrium_energy_summary.png'), dpi=200)
-    plt.close()
+    recorder = PhysicsRecorder()
+    x_plot: list[float] = []
+    y_fft: list[float] = []
+    y_unet: list[float] = []
+    hd_error_mae: list[float] = []
+    spin_error_mae: list[float] = []
+    he_error_mae: list[float] = []
+    ha_error_mae: list[float] = []
+    heff_error_mae: list[float] = []
+    he_fft_plot: list[float] = []
+    he_unet_plot: list[float] = []
+    ha_fft_plot: list[float] = []
+    ha_unet_plot: list[float] = []
+    hd_fft_plot: list[float] = []
+    hd_unet_plot: list[float] = []
+    heff_fft_plot: list[float] = []
+    heff_unet_plot: list[float] = []
+    full_fft: Dict[str, list] = {key: [] for key in ('demag', 'anis', 'excha', 'exter', 'total', 'iters', 'vortices', 'mz', 'time')}
+    full_unet: Dict[str, list] = {key: [] for key in ('demag', 'anis', 'excha', 'exter', 'total', 'iters', 'vortices', 'mz', 'time')}
 
-    fig_tot, ax_tot = plt.subplots(figsize=(9, 6))
-    fig_tot.suptitle(f"Total System Energy Profile Across M-H Sweep\n{title_text}", fontsize=11, fontweight='bold')
-    
-    ax_tot.plot(Hext_range, full_data_fft['total'], color='blue', lw=2.5, linestyle='-', label='FFT Engine Profile')
-    ax_tot.plot(Hext_range, full_data_un['total'], color='red', lw=2.5, linestyle='-', label='UNet Model Profile')
-    
-    ax_tot.set_title('Equilibrium Total System Energy ($E_{total}$)', fontsize=12, fontweight='bold')
-    ax_tot.set_xlabel('External Field $H_{ext}$ [Oe]', fontsize=11)
-    ax_tot.set_ylabel('Total Energy [Joules]', fontsize=11) 
-    
-    combined_tot = list(full_data_fft['total']) + list(full_data_un['total'])
-    if len(combined_tot) > 0:
-        max_v, min_v = max(combined_tot), min(combined_tot)
-        v_range = max_v - min_v if max_v != min_v else 1.0
-        ax_tot.set_ylim(min_v - (v_range * 0.05), max_v + (v_range * 0.05))
-        
-    ax_tot.set_xlim(xmax_padded, xmin_padded)
-    ax_tot.grid(True, linestyle='--', alpha=0.4)
-    ax_tot.legend(loc='upper right', fontsize=10)
-    
-    plt.tight_layout()
-    fig_tot.subplots_adjust(top=0.85)
-    plt.savefig(os.path.join(full_energy_folder, 'macro_total_energy_summary.png'), dpi=200)
-    plt.close()
+    spin_mm = initial_spin.copy()
+    spin_un = initial_spin.copy()
 
-def plot_performance_summary(performance_fft, performance_un, Hext_range, base_path, args, spin_split, rand_seed):
-    """
-    Generates a final 2x2 multi-panel chart compiling global optimization metrics,
-    topological structures, and execution times across the full Hext range.
-    """
-    performance_folder = os.path.join(base_path, "summary_plots")
-    os.makedirs(performance_folder, exist_ok=True)
-    
-    fig, axs = plt.subplots(2, 2, figsize=(15, 11))
-    
-    title_text = (
-        f"Film Layers: {args.layers} | Grid Size: {args.w}x{args.w} | Split: {spin_split} | Seed: {rand_seed}\n"
-        f"Material Properties ── $M_s$: {args.Ms} emu/cc | $A_x$: {args.Ax} pJ/m | $K_u$: {args.Ku} $J/m^3$\n"
-    )
-    fig.suptitle(title_text, fontsize=13, fontweight='bold')
-    
-    # Calculate uniform X-axis bounds with  5% padding
-    max_h, min_h = max(Hext_range), min(Hext_range)
-    h_range = max_h - min_h
-    xmax_padded = max_h + (h_range * 0.05)
-    xmin_padded = min_h - (h_range * 0.05)
-    
-    plot_map = [
-        ('iters', 'Solver Iterations Per Loop', 'Total Iteration Count/Hext Step', axs[0, 0]),
-        ('vortices', 'Topological Vortex Count', 'Absolute Vortex Population Count', axs[0, 1]),
-        ('mz', 'Mean Out-of-Plane Magnetization ($|M_z|$)', 'Average Absolute Magnitude $|M_z|$', axs[1, 0]),
-        ('time', 'Real-World Total Execution Time', 'Compute Duration [Seconds]', axs[1, 1]) 
-    ]
-    
-    for key, panel_title, y_label, ax in plot_map:
-        ax.plot(Hext_range, performance_fft[key], color='blue', lw=2, linestyle='-', label='FFT Engine Profile')
-        ax.plot(Hext_range, performance_un[key], color='red', lw=2, linestyle='-', label='UNet Model Profile')
-        
-        ax.set_title(panel_title, fontsize=11, fontweight='bold')
-        ax.set_xlabel('External Field $H_{ext}$ [Oe]', fontsize=10)
-        ax.set_ylabel(y_label, fontsize=10)
-        
-        combined_vals = list(performance_fft[key]) + list(performance_un[key])
-        if len(combined_vals) > 0:
-            max_v, min_v = max(combined_vals), min(combined_vals)
-            v_range = max_v - min_v if max_v != min_v else 1.0
-            ymax = max_v + (v_range * 0.05)
-            
-            # check for fields like vortex counts or Mz that sit flat at 0.0
-            ymin = -0.05 * max_v if min_v == 0.0 and max_v != 0.0 else min_v - (v_range * 0.05)
-            ax.set_ylim(ymin, ymax)
-            
-        ax.set_xlim(xmax_padded, xmin_padded) # Keeps standard reversing sweep profile view orientation
-        ax.grid(True, linestyle='--', alpha=0.4)
-        ax.legend(loc='upper right', fontsize=9)
-        
-    plt.tight_layout()
-    plt.savefig(os.path.join(performance_folder, 'performance_summary.png'), dpi=200)
-    plt.close()
+    general_title_summary = (f"Film Layers: {args.layers} | Grid Size: {args.w}x{args.w} | Split: {args.spin_split} | "
+                             f"Seed: {args.rand_seed} | Mask: {args.mask}\n"
+                             f"Material Properties — Ms: {args.Ms} emu/cc | Ax: {args.Ax} erg/cm | Ku: {args.Ku} erg/cc\n")
 
-def plot_error_summary(Hext_range, inst_hd_mae, traj_shift_mae, hex_err_mae, hanis_err_mae, base_path, args, spin_split, rand_seed):
-    """
-    Generates a final 2x2 multi-panel master report compiling all local field approximations,
-    historical path tracking drift, and intrinsic field deviations across the Hext sweep.
-    """
-    error_summary_folder = os.path.join(base_path, "summary_plots")
-    os.makedirs(error_summary_folder, exist_ok=True)
-    
-    print("Generating comprehensive 4-panel error tracking analysis...")
-    fig, axs = plt.subplots(2, 2, figsize=(15, 12))
-    
-    title_text = (
-        f"Film Layers: {args.layers} | Grid Size: {args.w}x{args.w} | Split: {spin_split} | Seed: {rand_seed}\n"
-        f"Material Properties ── $M_s$: {args.Ms} emu/cc | $A_x$: {args.Ax} pJ/m | $K_u$: {args.Ku} $J/m^3$\n"
-    )
-    fig.suptitle(title_text, fontsize=13, fontweight='bold')
-    
-    # Calculate uniform X-axis limits with standard 5% padding while maintaining the reversed sweep
-    max_h, min_h = max(Hext_range), min(Hext_range)
-    h_range = max_h - min_h if max_h != min_h else 1.0
-    xmax_padded = max_h + (h_range * 0.05)
-    xmin_padded = min_h - (h_range * 0.05)
-    
-    # Structural Mapping Matrix to cycle configurations cleanly
-    plot_map = [
-        (inst_hd_mae, 'darkorange', 'Total Unet Model $H_{demag}$ Approximation Error', '$H_{demag}$ Field Prediction Error', 'Instantaneous $H_{demag}$ MAE [Oe]', axs[0, 0]),
-        (traj_shift_mae, 'crimson', 'Magnetization Trajectory Drift (Accumulated Error)', 'Predicted Magnetization Error', 'Cumulative Spin $\\vec{m}$ MAE', axs[0, 1]),
-        (hex_err_mae, 'purple', 'Total Exchange Field ($H_{ex}$) Error Accumulation', '$H_{ex}$ Prediction Error', 'Exchange Field MAE [Oe]', axs[1, 0]),
-        (hanis_err_mae, 'teal', 'Total Anisotropy Field ($H_{anis}$) Error Accumulation', '$H_{anis}$ Prediction Error', 'Anisotropy Field MAE [Oe]', axs[1, 1])
-    ]
-    
-    for data, color, subtitle, label, y_label, ax in plot_map:
-        ax.plot(Hext_range, data, color=color, lw=2, linestyle='-', label=label)
-        
-        ax.set_title(subtitle, fontsize=11, fontweight='bold')
-        ax.set_xlabel('External Magnetic Field $H_{ext}$ [Oe]', fontsize=10)
-        ax.set_ylabel(y_label, fontsize=10)
-        
-        max_v, min_v = max(data), min(data)
-        v_range = max_v - min_v if max_v != min_v else 1.0
-        ymax = max_v + (v_range * 0.05)
-        ymin = -0.05 * max_v if min_v == 0.0 and max_v != 0.0 else min_v - (v_range * 0.05)
-        
-        # Apply bounds and format canvas grids
-        ax.set_xlim(xmax_padded, xmin_padded) 
-        ax.set_ylim(ymin, ymax)
-        ax.grid(True, linestyle='--', alpha=0.4)
-        ax.legend(loc='upper right', fontsize=9)
-        
-    plt.tight_layout()
-    plt.savefig(os.path.join(error_summary_folder, 'comprehensive_error_analysis.png'), dpi=300)
-    plt.close()
+    for nloop, hext_scalar in enumerate(hext_range):
+        hext_vector = hext_scalar * sweep_direction
+        print(f">>>>> loop: {nloop}, Hext: {hext_scalar}")
+        previous_fft = spin_mm.copy()
+        previous_unet = spin_un.copy()
 
-def plot_fields_summary(Hext_range, hex_mm, hex_un, hanis_mm, hanis_un, hd_mm, hd_un, heff_mm, heff_un, base_path, args, spin_split, rand_seed):
-    """
-    Generates a 2x2 panel graph chart recording equilibrium 
-    magnitudes of all internal fields across the completed Hext sweep range.
-    """
-    fields_summary_folder = os.path.join(base_path, "summary_plots")
-    os.makedirs(fields_summary_folder, exist_ok=True)
+        start = time.time()
+        error_fft, iterations_fft = update_spin_fft(film_fft, hext_vector, args)
+        fft_runtime = time.time() - start
+        start = time.time()
+        error_unet, iterations_unet = update_spin_unet(film_unet, hext_vector, args)
+        unet_runtime = time.time() - start
+        final_fft_error = float(error_fft[-1]) if len(error_fft) else np.nan
+        final_unet_error = float(error_unet[-1]) if len(error_unet) else np.nan
+
+        film_fft.GetEnergy_detailed(Hext=hext_vector)
+        film_unet.GetEnergy_detailed(Hext=hext_vector)
+
+        fft_spin_for_winding = film_fft.Spin.permute(3, 0, 1, 2)[:, :, :, 0].unsqueeze(0)
+        unet_spin_for_winding = film_unet.Spin.permute(3, 0, 1, 2)[:, :, :, 0].unsqueeze(0)
+        fft_winding_map, fft_winding_abs, fft_winding_sum = winding_density(fft_spin_for_winding)
+        unet_winding_map, unet_winding_abs, unet_winding_sum = winding_density(unet_spin_for_winding)
+        fft_topology = analyze_winding_components(fft_winding_map, relative_threshold=args.core_relative_threshold, absolute_threshold=args.core_absolute_threshold,
+                                                  min_cells=args.core_min_cells, min_abs_charge=args.core_min_abs_charge)
+
+        unet_topology = analyze_winding_components(unet_winding_map, relative_threshold=args.core_relative_threshold, absolute_threshold=args.core_absolute_threshold,
+                                                   min_cells=args.core_min_cells, min_abs_charge=args.core_min_abs_charge)
+
+        snapshot = recorder.capture(mh_step=nloop,
+                                    hext_scalar=hext_scalar,
+                                    hext_vector=hext_vector,
+                                    projection_direction=sweep_direction,
+                                    film_fft=film_fft,
+                                    film_unet=film_unet,
+                                    fft_winding_abs=fft_winding_abs,
+                                    fft_winding_sum=fft_winding_sum,
+                                    unet_winding_abs=unet_winding_abs,
+                                    unet_winding_sum=unet_winding_sum,
+                                    fft_topology=fft_topology,
+                                    unet_topology=unet_topology,
+                                    fft_iterations=iterations_fft,
+                                    unet_iterations=iterations_unet,
+                                    fft_final_convergence_error=final_fft_error,
+                                    unet_final_convergence_error=final_unet_error,
+                                    fft_runtime_seconds=fft_runtime,
+                                    unet_runtime_seconds=unet_runtime,
+                                    cell_count=cell_count)
+
+        spin_mm = film_fft.Spin.detach().cpu().numpy()
+        spin_un = film_unet.Spin.detach().cpu().numpy()
+        hd_mm = film_fft.Hd.detach().cpu().numpy()
+        hd_un = film_unet.Hd.detach().cpu().numpy()
+
+        x_plot.append(float(hext_scalar))
+        y_fft.append(float(snapshot['fft_m_projection']))
+        y_unet.append(float(snapshot['unet_m_projection']))
+        hd_error_mae.append(float(snapshot['hd_mae']))
+        spin_error_mae.append(float(snapshot['spin_mae']))
+        he_error_mae.append(float(snapshot['he_mae']))
+        ha_error_mae.append(float(snapshot['ha_mae']))
+        heff_error_mae.append(float(snapshot['heff_mae']))
+
+        he_fft_plot.append(float(snapshot['fft_he_mean']))
+        ha_fft_plot.append(float(snapshot['fft_ha_mean']))
+        hd_fft_plot.append(float(snapshot['fft_hd_mean']))
+        heff_fft_plot.append(float(snapshot['fft_heff_mean']))
+        he_unet_plot.append(_mean_field_magnitude(film_unet.He, film_unet.Spin))
+        ha_unet_plot.append(_mean_field_magnitude(film_unet.Ha, film_unet.Spin))
+        hd_unet_plot.append(_mean_field_magnitude(film_unet.Hd, film_unet.Spin))
+        heff_unet_plot.append(_mean_field_magnitude(film_unet.Heff, film_unet.Spin))
+
+        for store, prefix in ((full_fft, 'fft'), (full_unet, 'unet')):
+            store['demag'].append(float(snapshot[f'{prefix}_e_demag']))
+            store['anis'].append(float(snapshot[f'{prefix}_e_anis']))
+            store['excha'].append(float(snapshot[f'{prefix}_e_exchange']))
+            store['exter'].append(float(snapshot[f'{prefix}_e_external']))
+            store['total'].append(float(snapshot[f'{prefix}_e_total']))
+            store['iters'].append(int(snapshot[f'{prefix}_iterations']))
+            store['vortices'].append(float(snapshot.get(f'{prefix}_total_core_count', snapshot[f'{prefix}_winding_abs'])))
+            store['mz'].append(float(snapshot[f'{prefix}_mz_abs_mean']))
+            store['time'].append(float(snapshot[f'{prefix}_runtime_seconds']))
+
+        title = (general_title_summary+ f"Loop: {nloop} | Hext = {hext_scalar:.1f} Oe | Iterations: FFT [{iterations_fft}] | UNet [{iterations_unet}]")
+
+        if not args.skip_original_plots:
+            plot_results(nloop=nloop, spin_mm=spin_mm, spin_un=spin_un, itern1=iterations_fft, itern2=iterations_unet, Hd_mm=hd_mm, Hd_un=hd_un,
+                         x_plot=x_plot, y1_plot=y_fft, y2_plot=y_unet, Hext_range=hext_range, error1_rcd=error_fft, error2_rcd=error_unet, save_path_iteration=str(original_plot_dir),
+                         general_title_iteration=title)
+
+        if np.isclose(hext_scalar, 0.0):
+            np.save(output_dir / "Mr_spin_mm.npy", spin_mm)
+            np.save(output_dir / "Mr_spin_un.npy", spin_un)
+        if previous_fft[..., 0].sum() > 0 and spin_mm[..., 0].sum() <= 0:
+            np.save(output_dir / f"Hc{nloop-1}_spin_mm.npy", previous_fft)
+            np.save(output_dir / f"Hc{nloop}_spin_mm.npy", spin_mm)
+        if previous_unet[..., 0].sum() > 0 and spin_un[..., 0].sum() <= 0:
+            np.save(output_dir / f"Hc{nloop-1}_spin_un.npy", previous_unet)
+            np.save(output_dir / f"Hc{nloop}_spin_un.npy", spin_un)
+
+    physics_df = recorder.save_csv(output_dir / "physics_snapshots.csv")
+    np.save(output_dir / "Hext_array.npy", np.asarray(x_plot))
+    np.save(output_dir / "Mext_array_mm.npy", np.asarray(y_fft))
+    np.save(output_dir / "Mext_array_un.npy", np.asarray(y_unet))
+    np.save(output_dir / "instantaneous_hd_mae.npy", np.asarray(hd_error_mae))
+    np.save(output_dir / "trajectory_shift_mae.npy", np.asarray(spin_error_mae))
+    print(f"Saved {len(physics_df)} converged physics snapshots to {output_dir / 'physics_snapshots.csv'}")
+
+    if not args.skip_summary_plots:
+        plot_full_energy_summary(general_title_summary, str(summary_dir), full_fft, full_unet, hext_range)
+        plot_performance_summary(general_title_summary, str(summary_dir), full_fft, full_unet, hext_range)
+        plot_error_summary(general_title_summary, str(summary_dir), hext_range, hd_error_mae, spin_error_mae, he_error_mae, ha_error_mae)
+        plot_fields_summary(general_title_summary, str(summary_dir), hext_range, he_fft_plot, he_unet_plot, ha_fft_plot, ha_unet_plot, hd_fft_plot, hd_unet_plot, heff_fft_plot, heff_unet_plot)
+        plot_error_correlations(general_title_summary, str(summary_dir), hd_error_mae, he_error_mae, ha_error_mae, spin_error_mae, Hext_range=hext_range)
+
+    if args.skip_parts_2_to_5:
+        return
     
-    print("Generating final 4-panel physical field summary plot...")
-    fig, axs = plt.subplots(2, 2, figsize=(15, 11))
+    transition_directory = summary_dir / "transition_analysis"
+    transition_analyzer = TransitionAnalyzer(physics_df, merge_gap=args.transition_merge_gap, winding_tolerance=args.transition_winding_tolerance, magnetization_z_threshold=args.transition_m_z_threshold,
+                                             min_magnetization_change=args.transition_min_m_change, pretransition_windows=(3, 5, 10, 20))
+    events_df, labeled_df = transition_analyzer.run(transition_directory, general_title_summary)
+
+    if not args.skip_summary_plots and 'fft_winding_abs' in labeled_df:
+        for event_type in ('both', 'nucleation', 'annihilation'):
+            plot_error_vs_transition_proximity(general_title_summary, str(summary_dir), spin_error_mae, 
+                                               labeled_df['fft_winding_abs'].to_numpy(dtype=float), event_type=event_type)
+
+    part3_directory = summary_dir / "leading_indicator_analysis"
+    indicator_analyzer = LeadingIndicatorAnalyzer(labeled_df, events_df=events_df, error_targets=('spin_mae', 'hd_mae'), 
+                                                  pretransition_windows=(3, 5, 10, 20), primary_window=args.indicator_primary_window, 
+                                                  max_lag=args.indicator_max_lag, lead_z_threshold=args.indicator_lead_z_threshold,
+                                                  post_event_exclusion=args.indicator_post_event_exclusion, n_permutations=args.indicator_permutations, 
+                                                  n_bootstrap=args.indicator_bootstrap, random_seed=args.indicator_random_seed)
     
-    title_text = (
-        f"Film Layers: {args.layers} | Grid Size: {args.w}x{args.w} | Split: {spin_split} | Seed: {rand_seed}\n"
-        f"Material Properties ── $M_s$: {args.Ms} emu/cc | $A_x$: {args.Ax} pJ/m | $K_u$: {args.Ku} $J/m^3$\n"
-    )
-    fig.suptitle(title_text, fontsize=13, fontweight='bold')
-    
-    max_h, min_h = max(Hext_range), min(Hext_range)
-    h_range = max_h - min_h if max_h != min_h else 1.0
-    xmax_padded = max_h + (h_range * 0.05)
-    xmin_padded = min_h - (h_range * 0.05)
-    
-    plot_map = [
-        (hex_mm, hex_un, 'Exchange Field ($H_{ex}$)', 'Mean $H_{ex}$ Magnitude [Oe]', axs[0, 0]),
-        (hanis_mm, hanis_un, 'Anisotropy Field ($H_{anis}$)', 'Mean $H_{anis}$ Magnitude [Oe]', axs[0, 1]),
-        (hd_mm, hd_un, 'Demagnetizing Field ($H_{demag}$)', 'Mean $H_{demag}$ Magnitude [Oe]', axs[1, 0]),
-        (heff_mm, heff_un, 'Total Effective Field ($H_{eff}$)', 'Mean $H_{eff}$ Magnitude [Oe]', axs[1, 1]) 
-    ]
-    
-    for data_mm, data_un, panel_title, y_label, ax in plot_map:
-        ax.plot(Hext_range, data_mm, color='blue', lw=2.5, linestyle='-', label='FFT Simulator (mm)')
-        ax.plot(Hext_range, data_un, color='red', lw=2.5, linestyle='-', label='UNet Model (un)')
-        
-        ax.set_title(panel_title, fontsize=11, fontweight='bold')
-        ax.set_xlabel('External Field $H_{ext}$ [Oe] Summary', fontsize=10)
-        ax.set_ylabel(y_label, fontsize=10)
-        
-        combined_vals = list(data_mm) + list(data_un)
-        if len(combined_vals) > 0:
-            max_v, min_v = max(combined_vals), min(combined_vals)
-            v_range = max_v - min_v if max_v != min_v else 1.0
-            ymax = max_v + (v_range * 0.05)
-            
-            # check for fields like Anisotropy that are set to at 0.0
-            ymin = -0.05 * max_v if min_v == 0.0 and max_v != 0.0 else min_v - (v_range * 0.05)
-            ax.set_ylim(ymin, ymax)
-            
-        ax.set_xlim(xmax_padded, xmin_padded) # Reverses axis to match physical sweep direction
-        ax.grid(True, linestyle='-.', alpha=0.5)
-        ax.legend(loc='upper right', fontsize=9)
-        
-    plt.tight_layout()
-    plt.savefig(os.path.join(fields_summary_folder, 'all_internal_fields_mh_sweep.png'), dpi=300)
-    plt.close()
+    indicator_ranking = indicator_analyzer.run(part3_directory, general_title_summary, top_n=args.indicator_top_n)
 
-def plot_error_correlations(hd_error, hex_error, hanis_error, traj_error, base_path, args, spin_split, rand_seed):
-    """
-    Generates scatter plots comparing each internal field error to the
-    trajectory error over the entire hysteresis sweep.
-    """
-    fields_summary_folder = os.path.join(base_path, "summary_plots")
-    os.makedirs(fields_summary_folder, exist_ok=True)
-    
-    print("Generating final 4-panel physical field summary plot...")
-    fig, axs = plt.subplots(2, 2, figsize=(15, 11))
-    
-    title_text = (
-        f"Film Layers: {args.layers} | Grid Size: {args.w}x{args.w} | Split: {spin_split} | Seed: {rand_seed}\n"
-        f"Material Properties ── $M_s$: {args.Ms} emu/cc | $A_x$: {args.Ax} pJ/m | $K_u$: {args.Ku} $J/m^3$\n"
-    )
-    fig.suptitle(title_text, fontsize=13, fontweight='bold')
-    fig, axs = plt.subplots(1,3, figsize=(15,5), constrained_layout=True)
+    publication_formats = tuple(item.strip() for item in args.publication_formats.split(',') if item.strip())
+    publication_generator = PublicationFigureGenerator(labeled_df, events_df, indicator_ranking, primary_window=args.indicator_primary_window,
+                                                       top_n=args.publication_top_n, pre_steps=args.publication_pre_steps, post_steps=args.publication_post_steps,
+                                                       dpi=args.publication_dpi, formats=publication_formats, lead_z_threshold=args.indicator_lead_z_threshold)
+    publication_generator.run(summary_dir / "publication_figures", general_title_summary)
 
-    fig, axs = plt.subplots(1, 3, figsize=(16, 5.5), sharey=True, constrained_layout=True)
+    run_metadata: Dict[str, Any] = {
+        'run_label': args.run_label,
+        'grid_width': args.w,
+        'layers': args.layers,
+        'cell_size_nm': args.cell_size,
+        'Ms_emu_per_cc': args.Ms,
+        'Ax_erg_per_cm': args.Ax,
+        'Ku_erg_per_cc': args.Ku,
+        'Kvec': list(args.Kvec),
+        'dtime_seconds': args.dtime,
+        'damping': args.damping,
+        'error_min': args.error_min,
+        'max_iter': args.max_iter,
+        'mask': str(args.mask),
+        'loss_type': args.loss_type,
+        'model_name': args.model_name,
+        'spin_split': args.spin_split,
+        'rand_seed': args.rand_seed,
+        'hext_start_oe': args.hext_start,
+        'hext_end_oe': args.hext_end,
+        'hext_steps': args.hext_steps,
+        'field_angle_radians': args.field_angle_radians,
+        'core_relative_threshold': args.core_relative_threshold,
+        'core_absolute_threshold': args.core_absolute_threshold,
+        'core_min_cells': args.core_min_cells,
+        'core_min_abs_charge': args.core_min_abs_charge,
+        'transition_merge_gap': args.transition_merge_gap,
+        'transition_winding_tolerance': args.transition_winding_tolerance,
+        'transition_m_z_threshold': args.transition_m_z_threshold,
+        'transition_min_m_change': args.transition_min_m_change,
+        'indicator_primary_window': args.indicator_primary_window,
+        'indicator_max_lag': args.indicator_max_lag,
+        'indicator_permutations': args.indicator_permutations,
+        'indicator_bootstrap': args.indicator_bootstrap,
+        'checkpoint_path': str(checkpoint_path),
+        'evaluation_script_path': str(Path(__file__).resolve()),
+        'searcher_path': str((Path(__file__).resolve().parent / 'searcher.py')),}
 
-    datasets = [(hd_error, "Demagnetizing Field $H_{demag}$ [Oe] Error"), (hex_error, "Exchange Field $H_{ex}$ [Oe] Error"), 
-                (hanis_error, "Anisotropy Field $H_{anis}$ [Oe] Error")]
+    manuscript_formats = tuple(item.strip() for item in args.manuscript_formats.split(',') if item.strip())
+    manuscript_generator = ManuscriptOutputGenerator(physics_df, labeled_df, events_df, indicator_ranking, part3_directory=part3_directory, 
+                                                     run_metadata=run_metadata, primary_window=args.indicator_primary_window, top_n=args.manuscript_top_n, 
+                                                     formats=manuscript_formats)
+    manuscript_generator.run(summary_dir / "manuscript_outputs")
 
-    for ax, (x, xlabel) in zip(axs, datasets):
-        x = np.asarray(x)
-        y = np.asarray(traj_error)                 #TODO: check after if values need ax.set_xscale("log") ax.set_yscale("log")
-        result = linregress(x, y)
-        xx = np.linspace(x.min(), x.max(), 200)
-
-        slope = result.slope
-        intercept = result.intercept
-        r = result.rvalue
-        p = result.pvalue
-        r2 = r**2
-
-        ax.scatter(x, y, s=25, alpha=0.75)
-        ax.plot(xx, slope*xx + intercept, '--', linewidth=2)
-        ax.set_xlabel(xlabel)
-        ax.grid(alpha=0.3)
-
-        textbox = (f"r = {r:.3f}\n"
-                   f"$R^2$ = {r2:.3f}\n"
-                   f"p = {p:.2e}")
-
-        ax.text(0.04, 0.96, textbox, transform=ax.transAxes, va='top',fontsize=10, bbox=dict(facecolor='white', alpha=0.9))
-    
-    axs[0].set_ylabel("Trajectory Error")
-    fig.suptitle("Correlation Between Internal Field Errors and Trajectory Error\n\n" + title_text, 
-                 fontsize=13, fontweight='bold')
-
-    plt.savefig(os.path.join(fields_summary_folder, "error_correlations.png"), dpi=300, bbox_inches="tight")
-    plt.close()
+    if args.aggregate_root:
+        aggregate_output = Path(args.aggregate_output) if args.aggregate_output else Path(args.aggregate_root) / "cross_sweep_aggregate"
+        aggregator = CrossSweepAggregator(args.aggregate_root, min_runs=args.aggregate_min_runs)
+        summary = aggregator.run(aggregate_output)
+        print(f"Cross-sweep aggregation complete: {summary}")
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='MH Test')
-    parser.add_argument('--gpu',         type=int,    default=0,         help='GPU ID (default: 0)')
-    parser.add_argument('--krn',         type=int,    default=16,        help='unet first layer kernels (default: 16)')
-    parser.add_argument('--w',           type=int,    default=32,        help='MAG model size (default: 32)')
-    parser.add_argument('--layers',      type=int,    default=2,         help='MAG model layers (default: 2)')
-
-    parser.add_argument('--Ms',          type=float,  default=1000,      help='MAG model Ms (default: 1000)')
-    parser.add_argument('--Ax',          type=float,  default=0.5e-6,    help='MAG model Ax (default: 0.5e-6)')
-    parser.add_argument('--Ku',          type=float,  default=0.0,       help='MAG model Ku (default: 0.0)')
-    parser.add_argument('--Kvec',        type=Culist, default=(0,0,1),   help='MAG model Kvec (default: (0,0,1))')
-    parser.add_argument('--damping',     type=float,  default=0.1,       help='MAG model damping (default: 0.1)')
-    parser.add_argument('--Hext_val',    type=float,  default=0,         help='external field value (default: 0.0)')
-
-    parser.add_argument('--dtime',       type=float,  default=1.0e-13,   help='real time step (default: 1.0e-13)')
-    parser.add_argument('--error_min',   type=float,  default=1.0e-5,    help='min error (default: 1.0e-5)')
-    parser.add_argument('--max_iter',    type=int,    default=100000,    help='max iteration number (default: 100000)')
-    parser.add_argument('--mask',        type=MaskTp, default=False,     help='mask (default: False)')
-    parser.add_argument('--loss_type',  type=str,  default='baseline', help='loss weighting method')
-    parser.add_argument('--model_name',  type=str,  default='model.pt', help='name of model')
-
-    args = parser.parse_args() 
-    
-    device = torch.device("cuda:{}".format(args.gpu))
-
-    # create two film models
-    film1, film2 = initialize_models(args)
-
-    # initialize spin state
-    spin_split, rand_seed, cell_count = prepare_spin_state(film1, film2, args)
-    
-    # create folder
-    filename='./figs_k{}/model_{}/shape_{}/size{}_Ms{}_Ax{}_Ku{}_dtime{}_split{}_seed{}_Layers{}/'.format(
-                    args.krn, args.loss_type, args.mask, args.w, 
-                    args.Ms, args.Ax, args.Ku, 
-                    args.dtime, spin_split, rand_seed, args.layers
-                    )
-    os.makedirs(os.path.dirname(filename), exist_ok=True)
-    
-    
-    # get MH data
-    x_plot,y1_plot,y2_plot = [],[],[]
-
-    # Hext range
-    Hext_range = np.linspace(1000,-1000,201)
-    Hext_vec = np.array([np.cos(0.01), np.sin(0.01), 0.0])
-
-    spin_mm = np.array([[[[1]]]])
-    spin_un = np.array([[[[1]]]])
-
-    # Initialize lists to track Hex and Hanis data across the loop
-    hex_mm_plot, hex_un_plot = [], []
-    hanis_mm_plot, hanis_un_plot = [], []
-    hd_mm_plot, hd_un_plot = [], []
-    heff_mm_plot, heff_un_plot = [], []
-    
-    full_energy_fft = {'demag': [], 'anis': [], 'excha': [], 'exter': [], 'total': []}
-    full_energy_un  = {'demag': [], 'anis': [], 'excha': [], 'exter': [], 'total': []}
-    performance_fft = {'iters': [], 'vortices': [], 'mz': [], 'time': []}
-    performance_un  = {'iters': [], 'vortices': [], 'mz': [], 'time': []}
-
-    # Error accumulation tracking lists for fields and m
-    hex_error_mae = []
-    hanis_error_mae = []
-    heff_error_mae = []
-    instantaneous_hd_mae = []   
-    trajectory_shift_mae = [] 
-
-    # Main loop
-    for nloop, Hext_val in enumerate(Hext_range):
-        Hext = Hext_val * Hext_vec
-        print('>>>>>loop: {} , Hext: {}'.format(nloop, Hext_val))
-
-        spin0_mm = spin_mm
-        spin0_un = spin_un
-
-        # Update spin state
-        start_fft = time.time()
-        error1_rcd, itern1, hist_fft = update_spin_fft(film1, Hext, Hext_vec, cell_count, args)
-        time_elapsed_fft = time.time() - start_fft
-        start_un = time.time()
-        error2_rcd, itern2, hist_un = update_spin_unet(film2, Hext, Hext_vec, cell_count, args)
-        time_elapsed_un = time.time() - start_un
-
-        # Extract topological counts using winding density 
-        spin_fft_tensor = film1.Spin.permute(3, 0, 1, 2)[:, :, :, 0].unsqueeze(0)
-        spin_un_tensor  = film2.Spin.permute(3, 0, 1, 2)[:, :, :, 0].unsqueeze(0)
-        _, vortex_count_fft, _ = winding_density(spin_fft_tensor)
-        _, vortex_count_un,  _ = winding_density(spin_un_tensor)
-
-        # Append information for 
-        performance_fft['iters'].append(itern1)
-        performance_fft['vortices'].append(vortex_count_fft)
-        performance_fft['mz'].append(hist_fft['mz'][-1])
-        performance_fft['time'].append(time_elapsed_fft)
-        
-        performance_un['iters'].append(itern2)
-        performance_un['vortices'].append(vortex_count_un)
-        performance_un['mz'].append(hist_un['mz'][-1])
-        performance_un['time'].append(time_elapsed_un)
-    
-        # Extract final convergence values from the error logs
-        final_err_fft = error1_rcd[-1] if len(error1_rcd) > 0 else 0.0
-        final_err_un  = error2_rcd[-1] if len(error2_rcd) > 0 else 0.0
-
-        full_energy_fft['demag'].append(hist_fft['e_demag'][-1])
-        full_energy_fft['anis'].append(hist_fft['e_anis'][-1])
-        full_energy_fft['excha'].append(hist_fft['e_excha'][-1])
-        full_energy_fft['exter'].append(hist_fft['e_exter'][-1])
-        full_energy_fft['total'].append(hist_fft['e_total'][-1])
-
-        
-        full_energy_un['demag'].append(hist_un['e_demag'][-1])
-        full_energy_un['anis'].append(hist_un['e_anis'][-1])
-        full_energy_un['excha'].append(hist_un['e_excha'][-1])
-        full_energy_un['exter'].append(hist_un['e_exter'][-1])
-        full_energy_un['total'].append(hist_un['e_total'][-1])
-
-
-        # get spin and Hd
-        spin_mm = film1.Spin.detach().cpu().numpy()
-        spin_un = film2.Spin.detach().cpu().numpy()
-        Hd_mm = film1.Hd.detach().cpu().numpy()
-        Hd_un = film2.Hd.detach().cpu().numpy()
-        Hex_mm = film1.He.detach().cpu().numpy()
-        Hex_un = film2.He.detach().cpu().numpy()
-        Hanis_mm = film1.Ha.detach().cpu().numpy()
-        Hanis_un = film2.Ha.detach().cpu().numpy()
-        Heff_mm = film1.Heff.detach().cpu().numpy()
-        Heff_un = film2.Heff.detach().cpu().numpy()
-
-        # Calculate the spatial average magnitude across the grid sample
-        hex_mm_plot.append(np.mean(np.linalg.norm(Hex_mm, axis=-1)))
-        hex_un_plot.append(np.mean(np.linalg.norm(Hex_un, axis=-1)))
-        hanis_mm_plot.append(np.mean(np.linalg.norm(Hanis_mm, axis=-1)))
-        hanis_un_plot.append(np.mean(np.linalg.norm(Hanis_un, axis=-1)))
-        hd_mm_plot.append(np.mean(np.linalg.norm(Hd_mm, axis=-1)))      
-        hd_un_plot.append(np.mean(np.linalg.norm(Hd_un, axis=-1)))
-        heff_mm_plot.append(np.mean(np.linalg.norm(Heff_mm, axis=-1))) 
-        heff_un_plot.append(np.mean(np.linalg.norm(Heff_un, axis=-1)))
-
-        # Calculate and record the Mean Absolute Error (MAE) between UNet and FFT fields
-        hex_error_mae.append(np.mean(np.abs(Hex_un - Hex_mm)))
-        hanis_error_mae.append(np.mean(np.abs(Hanis_un - Hanis_mm)))
-        heff_error_mae.append(np.mean(np.abs(Heff_un - Heff_mm)))
-
-        # Calculate and append tracking errors
-        hd_error = np.mean(np.abs(Hd_un - Hd_mm))
-        spin_error = np.mean(np.abs(spin_un - spin_mm))
-
-        instantaneous_hd_mae.append(hd_error)
-        trajectory_shift_mae.append(spin_error)
-        
-        #MH loop data
-        x_plot.append(Hext_val)
-        y1_plot.append( np.dot(spin_mm.sum(axis=(0,1,2)), Hext_vec)/ cell_count )
-        y2_plot.append( np.dot(spin_un.sum(axis=(0,1,2)), Hext_vec)/ cell_count )
-
-        # Plot results
-        plot_results()
-        plot_iteration_domain_walls(
-            film1, film2, filename, nloop, Hext_val, 
-            args, spin_split, rand_seed, itern1, itern2, 
-            final_err_fft, final_err_un
-        )        
-        plot_iteration_fields(
-            hist_fft, hist_un, filename, nloop, Hext_val, 
-            args, spin_split, rand_seed, itern1, itern2, 
-            final_err_fft, final_err_un
-        )
-        plot_iteration_winding_density(
-            film1, film2, filename, nloop, Hext_val, 
-            args, spin_split, rand_seed, itern1, itern2, 
-            final_err_fft, final_err_un
-        )
-        # plot_iteration_energy(
-        #     hist_fft, hist_un, filename, nloop, Hext_val, 
-        #     args, spin_split, rand_seed, itern1, itern2, 
-        #     final_err_fft, final_err_un
-        # )
-
-        # Save MH data
-        np.save(filename + "Hext_array", x_plot)
-        np.save(filename + "Mext_array_mm", y1_plot)
-        np.save(filename + "Mext_array_un", y2_plot)
-
-        # Save tracking errors dynamically
-        np.save(filename + "instantaneous_hd_mae", instantaneous_hd_mae)
-        np.save(filename + "trajectory_shift_mae", trajectory_shift_mae)
-
-        # Save Mr
-        if Hext_val == 0:
-            np.save(filename + "Mr_spin_mm", spin_mm)
-            np.save(filename + "Mr_spin_un", spin_un)
-
-        # Save Hc
-        Mi = spin0_mm[:,:,:,0].sum()
-        Mj = spin_mm[:,:,:,0].sum()
-        if Mi > 0 and Mj <= 0:
-            np.save(filename + "Hc{}_spin_mm".format(nloop-1), spin0_mm)
-            np.save(filename + "Hc{}_spin_mm".format(nloop), spin_mm)
-
-        Mi = spin0_un[:,:,:,0].sum()
-        Mj = spin_un[:,:,:,0].sum()
-        if Mi > 0 and Mj <= 0:
-            np.save(filename + "Hc{}_spin_un".format(nloop-1), spin0_un)
-            np.save(filename + "Hc{}_spin_un".format(nloop), spin_un)
-
-    plot_full_energy_summary(
-        full_energy_fft, full_energy_un, Hext_range, 
-        filename, args, spin_split, rand_seed
-    )
-
-            
-    plot_performance_summary(
-        performance_fft, performance_un, Hext_range, 
-        filename, args, spin_split, rand_seed
-    )
-
-    plot_error_summary(
-        Hext_range, instantaneous_hd_mae, trajectory_shift_mae, 
-        hex_error_mae, hanis_error_mae, filename, 
-        args, spin_split, rand_seed
-    )
-
-    plot_fields_summary(
-        Hext_range, hex_mm_plot, hex_un_plot, 
-        hanis_mm_plot, hanis_un_plot, hd_mm_plot, hd_un_plot, 
-        heff_mm_plot, heff_un_plot, filename, 
-        args, spin_split, rand_seed
-    )
-
-    plot_error_correlations(hd_error, hex_error, hanis_error, traj_error, base_path, args, spin_split, rand_seed)
-
+    main()
 

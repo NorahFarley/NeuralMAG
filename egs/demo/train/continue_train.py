@@ -7,13 +7,14 @@ import logging
 import json
 import time
 from datetime import datetime
+import sys
 
 import torch
 import torch.optim as optimizer
 
 from Unet import UNet
 from data_load import dataset_prepare
-from utils import *
+from .utils import *
 
 
 def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_dataloader3):
@@ -25,15 +26,9 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
     Loss22 = AverageMeter()
     Loss31 = AverageMeter()
     Loss32 = AverageMeter()
-    
-    if args.dataug==True:
-        total_steps = round(1.1*len(train_dataloader1.dataset))
-    else:
-        total_steps = len(train_dataloader1.dataset)
-    
-    pbar = tqdm(total=total_steps, 
-                bar_format='\r{desc}: {percentage:3.0f}%|{bar}| [{elapsed}<{remaining}, {rate_fmt}{postfix}]',
-                leave=True)
+
+    total_samples = len(train_dataloader1.dataset)
+    processed_samples = 0
 
     #strat to train
     for batch_idx, (batch1, batch2, batch3) in enumerate(zip(train_dataloader1, train_dataloader2, train_dataloader3)):
@@ -161,10 +156,18 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
         Loss32.update( loss32.mean().item(),  x3.size(0) )
         Loss.update( ((loss11.mean()+loss21.mean()+loss31.mean())/3).item(),  x1.size(0)+x2.size(0)+x3.size(0) )
 
-        pbar.update(x1.size(0))
-        pbar.set_description('epoch {} Loss {:.1f} Loss1 {:.1f} / {:.3f} Loss2 {:.1f} / {:.3f} Loss3 {:.1f} / {:.3f}'.format(
-            epoch, Loss.avg, Loss11.avg, Loss12.avg, Loss21.avg, Loss22.avg, Loss31.avg, Loss32.avg))
-    pbar.close()
+        processed_samples += x1.size(0)
+        percentage = (processed_samples / total_samples) * 100
+
+        status_text = (
+            f"\rTrain: epoch {epoch} [{percentage:3.0f}%] | Loss {Loss.avg:.1f} | "
+            f"Loss1 {Loss11.avg:.1f}/{Loss12.avg:.3f} | Loss2 {Loss21.avg:.1f}/{Loss22.avg:.3f} | "
+            f"Loss3 {Loss31.avg:.1f}/{Loss32.avg:.3f}")
+        sys.stdout.write(status_text)
+        sys.stdout.flush()
+
+    # Finish the terminal line at the end of the epoch
+    sys.stdout.write('\n')
     print()
 
     #draw every 10 epoch
@@ -183,6 +186,9 @@ def eval(epoch, model, dataloader1, dataloader2, dataloader3, dataloader4):
     Loss2 = AverageMeter()
     Loss3 = AverageMeter()
     Loss4 = AverageMeter()
+
+    total_samples = len(dataloader1.dataset)
+    processed_samples = 0
 
     pbar = tqdm(total=len(dataloader1.dataset), 
                 bar_format='\r{desc}: {percentage:3.0f}%|{bar}| [{elapsed}<{remaining}, {rate_fmt}{postfix}]', 
@@ -222,12 +228,14 @@ def eval(epoch, model, dataloader1, dataloader2, dataloader3, dataloader4):
         Loss4.update( loss4.mean().item(),  x4.size(0) )
         Loss.update( ((loss1.mean()+loss2.mean()+loss3.mean()+loss4.mean())/4).item(), x1.size(0)+x2.size(0)+x3.size(0)+x4.size(0) )
 
-        pbar.update(x1.size(0))
-        pbar.set_description('Eval: epoch {} Loss {:.1f} Loss1 {:.1f} Loss2 {:.1f}  Loss3 {:.1f} Loss4 {:.1f}'.format(
-                              epoch, Loss.avg, Loss1.avg, Loss2.avg, Loss3.avg, Loss4.avg))
+        processed_samples += x1.size(0)
+        percentage = (processed_samples / total_samples) * 100
 
-    pbar.close()
-    print()
+        status_text = f"\rEval: epoch {epoch} [{percentage:3.0f}%] | Loss {Loss.avg:.1f} | Loss1 {Loss1.avg:.1f} | Loss2 {Loss2.avg:.1f} | Loss3 {Loss3.avg:.1f} | Loss4 {Loss4.avg:.1f}"
+        sys.stdout.write(status_text)
+        sys.stdout.flush()
+
+    sys.stdout.write('\n')
     
     #draw every 10 epoch
     if epoch > 0 and epoch % 10 == 0: 
@@ -392,14 +400,12 @@ if __name__ == '__main__':
     for epoch in range(args.epochs): 
         #train
         loss_train = train(epoch, model, optim,  train_dataloader1, train_dataloader2, train_dataloader3)
-        print_memory("After training")
 
         loss_train_list.append(loss_train)
         logging.info('epoch: {} loss: {:.2f}'.format(epoch, loss_train))
     
         #evaluate
         loss_test1, loss_test2, loss_test3, loss_test4, avg = eval(epoch, model, test_dataloader1, test_dataloader2, test_dataloader3, test_dataloader4)
-        print_memory("After evaluating")
         logging.info('Evaluate loss32: {:.1f} loss64: {:.1f} loss96: {:.1f} / loss128: {:.1f} avg: {:.1f}'
                     .format(loss_test1, loss_test2, loss_test3, loss_test4, avg))
         
@@ -456,7 +462,7 @@ if __name__ == '__main__':
 
     with open(os.path.join(ex_path, "experiment.json"), "w") as f:
         json.dump(experiment_info, f, indent=4)  
-
+    print_memory("Memory usage after training: ")
     logging.info(f"Best epoch: {best_epoch}")
     logging.info(f"Best validation loss: {best_loss}")
     logging.info(f"Training time: {elapsed:.2f} seconds")
