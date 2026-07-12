@@ -283,7 +283,7 @@ def main() -> None:
     original_plot_dir = output_dir / "original_iteration_plots"
     if not args.skip_original_plots:
         original_plot_dir.mkdir(parents=True, exist_ok=True)
-        hext_range = np.linspace(args.hext_start, args.hext_end, args.hext_steps)
+    hext_range = np.linspace(args.hext_start, args.hext_end, args.hext_steps)
     sweep_direction = np.array([np.cos(args.field_angle_radians), np.sin(args.field_angle_radians), 0.0,], dtype=float)
 
     recorder = PhysicsRecorder()
