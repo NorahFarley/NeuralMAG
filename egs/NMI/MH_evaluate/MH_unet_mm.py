@@ -45,7 +45,7 @@ from plots import (
 def load_unet_model(args: argparse.Namespace, device: torch.device) -> Path:
     # load Unet Model
     model = UNet(kc=args.krn, inc=args.layers*3, ouc=args.layers*3).eval().to(device)
-    checkpoint = '../ckpt/k{}/{}'.format(args.krn, args.model_name)
+    checkpoint = Path("../ckpt") / f"k{args.krn}" / args.model_name
     if not checkpoint.is_file():
         raise FileNotFoundError(f"UNet checkpoint was not found: {checkpoint.resolve()}")
     state = torch.load(checkpoint, map_location=device)
