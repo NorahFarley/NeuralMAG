@@ -101,7 +101,7 @@ MANUSCRIPT_FORMATS="csv,tex,md"
 # KEEP_ORIGINAL_PLOTS=1 preserves the original repository plot_results()
 # figure at every Hext step. Across this full sweep that creates 12,864 PNGs
 # (64 runs x 201 field points), so storage and plotting overhead are large.
-KEEP_ORIGINAL_PLOTS=0
+KEEP_ORIGINAL_PLOTS=1
 KEEP_SUMMARY_PLOTS=1
 
 # ---------------------------------------------------------------------------
