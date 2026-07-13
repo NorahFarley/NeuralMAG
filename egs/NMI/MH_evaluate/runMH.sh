@@ -50,7 +50,7 @@ GPU=0
 KRN=16
 LAYERS=2
 MODEL_NAME="model.pt"
-LOSS_TYPE="baseline"
+LOSS_TYPE="baseline_full"
 
 MS_BASE=1000
 AX_BASE="0.5e-6"
@@ -73,7 +73,7 @@ FIELD_ANGLE_RADIANS=0.01
 # ---------------------------------------------------------------------------
 # Set FINAL_STATISTICS=1 for manuscript-quality resampling statistics.
 # Leave it at 0 for faster screening/debugging runs.
-FINAL_STATISTICS=0
+FINAL_STATISTICS=1
 if [[ "$FINAL_STATISTICS" -eq 1 ]]; then
     INDICATOR_PERMUTATIONS=5000
     INDICATOR_BOOTSTRAP=2000
