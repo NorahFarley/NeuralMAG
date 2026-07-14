@@ -33,7 +33,6 @@ from libs.misc import Culist, MaskTp, spin_prepare, winding_density
 import libs.MAG2305 as MAG2305
 from libs.Unet import UNet
 from plots import (
-    plot_error_correlations,
     plot_error_summary,
     plot_error_vs_transition_proximity,
     plot_fields_summary,
@@ -281,8 +280,7 @@ def main() -> None:
     summary_dir = output_dir / "summary_plots"
     summary_dir.mkdir(parents=True, exist_ok=True)
     original_plot_dir = output_dir / "original_iteration_plots"
-    if not args.skip_original_plots:
-        original_plot_dir.mkdir(parents=True, exist_ok=True)
+    original_plot_dir.mkdir(parents=True, exist_ok=True)
     hext_range = np.linspace(args.hext_start, args.hext_end, args.hext_steps)
     sweep_direction = np.array([np.cos(args.field_angle_radians), np.sin(args.field_angle_radians), 0.0,], dtype=float)
 
@@ -397,8 +395,7 @@ def main() -> None:
 
         title = (general_title_summary+ f"Loop: {nloop} | Hext = {hext_scalar:.1f} Oe | Iterations: FFT [{iterations_fft}] | UNet [{iterations_unet}]")
 
-        if not args.skip_original_plots:
-            plot_results(nloop=nloop, spin_mm=spin_mm, spin_un=spin_un, itern1=iterations_fft, itern2=iterations_unet, Hd_mm=hd_mm, Hd_un=hd_un,
+        plot_results(nloop=nloop, spin_mm=spin_mm, spin_un=spin_un, itern1=iterations_fft, itern2=iterations_unet, Hd_mm=hd_mm, Hd_un=hd_un,
                          x_plot=x_plot, y1_plot=y_fft, y2_plot=y_unet, Hext_range=hext_range, error1_rcd=error_fft, error2_rcd=error_unet, save_path_iteration=str(original_plot_dir),
                          general_title_iteration=title)
 
