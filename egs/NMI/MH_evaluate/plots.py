@@ -590,23 +590,16 @@ def plot_error_summary(general_title_summary, save_path_summary, Hext_range, ins
     xmin_padded = min_h - (h_range * 0.05)
     
     # Structural Mapping Matrix to cycle configurations cleanly
-    plot_map = [(inst_hd_mae, 'darkorange', 'Total Unet Model $H_{demag}$ Approximation Error', '$H_{demag}$ Field Prediction Error', 'Instantaneous $H_{demag}$ MAE [Oe]', axs[0, 0]),
-                (traj_shift_mae, 'crimson', 'Magnetization Trajectory Drift (Accumulated Error)', 'Predicted Magnetization Error', 'Cumulative Spin $\\vec{m}$ MAE', axs[0, 1]),
-                (hex_err_mae, 'purple', 'Total Exchange Field ($H_{ex}$) Error Accumulation', '$H_{ex}$ Prediction Error', 'Exchange Field MAE [Oe]', axs[1, 0]),
-                (hanis_err_mae, 'teal', 'Total Anisotropy Field ($H_{anis}$) Error Accumulation', '$H_{anis}$ Prediction Error', 'Anisotropy Field MAE [Oe]', axs[1, 1])]
+    plot_map = [(inst_hd_mae, 'darkorange', 'Total Unet Model $H_{demag}$ Approximation Error', '$H_{demag}$ Field Prediction Error', 'Instantaneous $H_{demag}$ MAE [Oe]', axs[0, 0], 'hd'),
+                (traj_shift_mae, 'crimson', 'Magnetization Trajectory Drift (Accumulated Error)', 'Predicted Magnetization Error', 'Cumulative Spin $\\vec{m}$ MAE', axs[0, 1], 'trajectory'),
+                (hex_err_mae, 'purple', 'Total Exchange Field ($H_{ex}$) Error Accumulation', '$H_{ex}$ Prediction Error', 'Exchange Field MAE [Oe]', axs[1, 0], 'exchange'),
+                (hanis_err_mae, 'teal', 'Total Anisotropy Field ($H_{anis}$) Error Accumulation', '$H_{anis}$ Prediction Error', 'Anisotropy Field MAE [Oe]', axs[1, 1], 'anisotropy')]
     
     for data, color, subtitle, label, y_label, ax, limit_key in plot_map:
         data_array = np.asarray(data, dtype=float)
         ymin, ymax = fixed_y_limits[limit_key]
 
-        ax.plot(
-            Hext_range,
-            data_array,
-            color=color,
-            lw=2,
-            linestyle="-",
-            label=label,
-        )
+        ax.plot(Hext_range, data_array, color=color, lw=2, linestyle="-", label=label)
         ax.set_title(subtitle, fontsize=11, fontweight="bold")
         ax.set_xlabel("External Magnetic Field $H_{ext}$ [Oe]", fontsize=10)
         ax.set_ylabel(y_label, fontsize=10)
