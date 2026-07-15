@@ -548,7 +548,7 @@ def plot_performance_summary(general_title_summary, save_path_summary, performan
     plt.savefig(os.path.join(performance_folder, 'performance_summary.png'), dpi=200)
     plt.close()
 
-def plot_error_summary(general_title_summary, save_path_summary, Hext_range, inst_hd_mae, traj_shift_mae, hex_err_mae, hanis_err_mae):
+def plot_error_summary(general_title_summary, save_path_summary, Hext_range, inst_hd_mae, traj_shift_mae, hex_err_mae, hanis_err_mae, y_limits=None):
     """
     Generates a final 2x2 multi-panel master report compiling all local field approximations,
     historical path tracking drift, and intrinsic field deviations across the Hext sweep.
@@ -559,6 +559,28 @@ def plot_error_summary(general_title_summary, save_path_summary, Hext_range, ins
     print("Generating comprehensive 4-panel error tracking analysis...")
     fig, axs = plt.subplots(2, 2, figsize=(15, 12))
     
+    default_y_limits = {"hd": (0.0, 400.0),
+                        "trajectory": (0.0, 0.75),
+                        "exchange": (0.0, 400.0),
+                        "anisotropy": (0.0, 400.0),}
+    
+    fixed_y_limits = default_y_limits.copy()
+    if y_limits is not None:
+        unknown_keys = set(y_limits) - set(default_y_limits)
+        if unknown_keys:
+            raise ValueError(
+                "Unknown plot_error_summary y-limit key(s): "
+                + ", ".join(sorted(unknown_keys))
+            )
+        fixed_y_limits.update(y_limits)
+
+    for name, limits in fixed_y_limits.items():
+        if len(limits) != 2 or limits[0] >= limits[1]:
+            raise ValueError(
+                f"Invalid y-axis limits for {name}: {limits}. "
+                "Expected (minimum, maximum) with minimum < maximum."
+            )
+
     fig.suptitle("Field Component Error Summary\n\n" + general_title_summary, fontsize=13, fontweight='bold')
     
     # Calculate uniform X-axis limits with standard 5% padding while maintaining the reversed sweep
@@ -573,25 +595,44 @@ def plot_error_summary(general_title_summary, save_path_summary, Hext_range, ins
                 (hex_err_mae, 'purple', 'Total Exchange Field ($H_{ex}$) Error Accumulation', '$H_{ex}$ Prediction Error', 'Exchange Field MAE [Oe]', axs[1, 0]),
                 (hanis_err_mae, 'teal', 'Total Anisotropy Field ($H_{anis}$) Error Accumulation', '$H_{anis}$ Prediction Error', 'Anisotropy Field MAE [Oe]', axs[1, 1])]
     
-    for data, color, subtitle, label, y_label, ax in plot_map:
-        ax.plot(Hext_range, data, color=color, lw=2, linestyle='-', label=label)
-        ax.set_title(subtitle, fontsize=11, fontweight='bold')
-        ax.set_xlabel('External Magnetic Field $H_{ext}$ [Oe]', fontsize=10)
+    for data, color, subtitle, label, y_label, ax, limit_key in plot_map:
+        data_array = np.asarray(data, dtype=float)
+        ymin, ymax = fixed_y_limits[limit_key]
+
+        ax.plot(
+            Hext_range,
+            data_array,
+            color=color,
+            lw=2,
+            linestyle="-",
+            label=label,
+        )
+        ax.set_title(subtitle, fontsize=11, fontweight="bold")
+        ax.set_xlabel("External Magnetic Field $H_{ext}$ [Oe]", fontsize=10)
         ax.set_ylabel(y_label, fontsize=10)
-        
-        max_v, min_v = max(data), min(data)
-        v_range = max_v - min_v if max_v != min_v else 1.0
-        ymax = max_v + (v_range * 0.05)
-        ymin = -0.05 * max_v if min_v == 0.0 and max_v != 0.0 else min_v - (v_range * 0.05)
-        
-        # Apply bounds and format canvas grids
-        ax.set_xlim(xmax_padded, xmin_padded) 
+        ax.set_xlim(xmax_padded, xmin_padded)
         ax.set_ylim(ymin, ymax)
-        ax.grid(True, linestyle='--', alpha=0.4)
-        ax.legend(loc='upper right', fontsize=9)
-        
+        ax.grid(True, linestyle="--", alpha=0.4)
+        ax.legend(loc="upper right", fontsize=9)
+
+        # Fixed limits can clip an unusually large run. Warn rather than
+        # silently hiding that fact.
+        finite_data = data_array[np.isfinite(data_array)]
+        if finite_data.size:
+            observed_min = float(np.min(finite_data))
+            observed_max = float(np.max(finite_data))
+            if observed_min < ymin or observed_max > ymax:
+                print(
+                    f"[plot_error_summary] WARNING: {limit_key} data range "
+                    f"({observed_min:.6g}, {observed_max:.6g}) exceeds the "
+                    f"fixed y-axis range ({ymin:.6g}, {ymax:.6g})."
+                )
+
     plt.tight_layout()
-    plt.savefig(os.path.join(error_summary_folder, 'comprehensive_error_analysis.png'), dpi=300)
+    plt.savefig(
+        os.path.join(error_summary_folder, "comprehensive_error_analysis.png"),
+        dpi=300,
+    )
     plt.close()
 
 def plot_fields_summary(general_title_summary, save_path_summary, Hext_range, hex_mm, hex_un, hanis_mm, hanis_un, hd_mm, hd_un, heff_mm, heff_un):
