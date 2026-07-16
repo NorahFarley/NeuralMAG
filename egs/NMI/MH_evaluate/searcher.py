@@ -123,23 +123,21 @@ def _masked_values(values: torch.Tensor, active_mask: torch.Tensor) -> torch.Ten
 
 def _field_statistics(field: torch.Tensor, active_mask: torch.Tensor) -> Dict[str, float]:
     magnitudes = _masked_values(torch.linalg.vector_norm(field, dim=-1), active_mask)
-    return {
-        "mean": float(magnitudes.mean().item()),
-        "std": float(magnitudes.std(unbiased=False).item()),
-        "max": float(magnitudes.max().item()),
-        "rms": float(torch.sqrt(torch.mean(magnitudes.square())).item()),
-    }
+
+    return {"mean": float(magnitudes.mean().item()),
+            "std": float(magnitudes.std(unbiased=False).item()),
+            "max": float(magnitudes.max().item()),
+            "rms": float(torch.sqrt(torch.mean(magnitudes.square())).item()),}
 
 
 def _torque_statistics(spin: torch.Tensor, field: torch.Tensor,
                        active_mask: torch.Tensor) -> Dict[str, float]:
     magnitude = torch.linalg.vector_norm(torch.cross(spin, field, dim=-1), dim=-1)
     magnitude = _masked_values(magnitude, active_mask)
-    return {
-        "mean": float(magnitude.mean().item()),
-        "max": float(magnitude.max().item()),
-        "rms": float(torch.sqrt(torch.mean(magnitude.square())).item()),
-    }
+
+    return {"mean": float(magnitude.mean().item()),
+            "max": float(magnitude.max().item()),
+            "rms": float(torch.sqrt(torch.mean(magnitude.square())).item()),}
 
 
 def _alignment_statistics(spin: torch.Tensor, field: torch.Tensor,
@@ -148,11 +146,10 @@ def _alignment_statistics(spin: torch.Tensor, field: torch.Tensor,
     field_norm = torch.linalg.vector_norm(field, dim=-1)
     cosine = torch.sum(spin * field, dim=-1) / (spin_norm * field_norm + _EPS)
     cosine = _masked_values(cosine, active_mask)
-    return {
-        "mean": float(cosine.mean().item()),
-        "abs_mean": float(cosine.abs().mean().item()),
-        "std": float(cosine.std(unbiased=False).item()),
-    }
+
+    return {"mean": float(cosine.mean().item()),
+            "abs_mean": float(cosine.abs().mean().item()),
+            "std": float(cosine.std(unbiased=False).item()),}
 
 
 def _energy_value(model: Any, attribute: str) -> float:
@@ -289,11 +286,10 @@ def _predictor_group(name: str) -> str:
 
 def _friendly_name(name: str) -> str:
     text = name.replace("fft_", "").replace("unet_", "").replace("_", " ")
-    replacements = {
-        "hd": "Hdemag", "he": "Hexchange", "ha": "Hanisotropy",
-        "heff": "Heffective", "tau": "torque", "rms": "RMS",
-        "mae": "MAE", "rmse": "RMSE",
-    }
+    replacements = {"hd": "Hdemag", "he": "Hexchange", "ha": "Hanisotropy",
+                    "heff": "Heffective", "tau": "torque", "rms": "RMS",
+                    "mae": "MAE", "rmse": "RMSE",}
+    
     words = [replacements.get(word, word) for word in text.split()]
     return " ".join(words).title().replace("Rms", "RMS").replace("Mae", "MAE").replace("Rmse", "RMSE")
 
@@ -985,17 +981,15 @@ class LeadingIndicatorAnalyzer:
                     run += 1
                 else:
                     break
-            rows.append({
-                "predictor": predictor,
-                "event_id": int(event["event_id"]),
-                "event_kind": str(event["event_kind"]),
-                "onset_step": onset,
-                "onset_hext": float(event["onset_hext"]),
-                "lead_time_steps": int(run),
-                "detected": bool(run > 0),
-                "baseline_center": center,
-                "baseline_scale": scale,
-            })
+            rows.append({"predictor": predictor,
+                         "event_id": int(event["event_id"]),
+                         "event_kind": str(event["event_kind"]),
+                         "onset_step": onset,
+                         "onset_hext": float(event["onset_hext"]),
+                         "lead_time_steps": int(run),
+                         "detected": bool(run > 0),
+                         "baseline_center": center,
+                         "baseline_scale": scale,})
         return pd.DataFrame(rows)
 
     def _error_metrics(self, predictor: str, oriented_residual: np.ndarray) -> List[Dict[str, Any]]:
@@ -1030,16 +1024,14 @@ class LeadingIndicatorAnalyzer:
                     if abs(r_perm) >= abs(best_r) - 1e-15:
                         exceed += 1
                 p = (exceed + 1.0) / (self.n_permutations + 1.0)
-            rows.append({
-                "predictor": predictor,
-                "error_target": target,
-                "pearson_zero_lag": _safe_pearson(oriented_residual, error),
-                "spearman_zero_lag": _safe_spearman(oriented_residual, error),
-                "mutual_information_zero_lag": mi,
-                "best_leading_lag_steps": int(best_lag),
-                "best_leading_lag_r": float(best_r),
-                "best_leading_lag_p": p,
-            })
+            rows.append({"predictor": predictor,
+                         "error_target": target,
+                         "pearson_zero_lag": _safe_pearson(oriented_residual, error),
+                         "spearman_zero_lag": _safe_spearman(oriented_residual, error),
+                         "mutual_information_zero_lag": mi,
+                         "best_leading_lag_steps": int(best_lag),
+                         "best_leading_lag_r": float(best_r),
+                         "best_leading_lag_p": p,})
         return rows
 
     def analyze(self) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -1080,21 +1072,19 @@ class LeadingIndicatorAnalyzer:
                     mw_p = np.nan
                 circular_p = self._permutation_p(y, score, auc)
                 ci_low, ci_high = self._bootstrap_auc(y, score)
-                window_rows.append({
-                    "predictor": predictor,
-                    "predictor_group": _predictor_group(predictor),
-                    "window_steps": int(window),
-                    "direction": int(direction),
-                    "auc_oriented": auc,
-                    "auc_raw_oriented": raw_auc,
-                    "auc_ci_low": ci_low,
-                    "auc_ci_high": ci_high,
-                    "cohens_d_oriented": effect,
-                    "mannwhitney_p": mw_p,
-                    "circular_p": circular_p,
-                    "n_pretransition": int(y.sum()),
-                    "n_quiet": int((~y).sum()),
-                })
+                window_rows.append({"predictor": predictor,
+                                    "predictor_group": _predictor_group(predictor),
+                                    "window_steps": int(window),
+                                    "direction": int(direction),
+                                    "auc_oriented": auc,
+                                    "auc_raw_oriented": raw_auc,
+                                    "auc_ci_low": ci_low,
+                                    "auc_ci_high": ci_high,
+                                    "cohens_d_oriented": effect,
+                                    "mannwhitney_p": mw_p,
+                                    "circular_p": circular_p,
+                                    "n_pretransition": int(y.sum()),
+                                    "n_quiet": int((~y).sum()),})
 
             lead_frames.append(self._event_lead_times(oriented, predictor))
             error_rows.extend(self._error_metrics(predictor, oriented))
@@ -1108,13 +1098,11 @@ class LeadingIndicatorAnalyzer:
                 valid = labels | quiet_mask
                 if np.unique(labels[valid]).size < 2:
                     continue
-                event_kind_rows.append({
-                    "predictor": predictor,
-                    "event_kind": event_kind,
-                    "n_events": len(event_ids),
-                    "auc_oriented": _auc(labels[valid], oriented[valid]),
-                    "direction": int(direction),
-                })
+                event_kind_rows.append({"predictor": predictor,
+                                        "event_kind": event_kind,
+                                        "n_events": len(event_ids),
+                                        "auc_oriented": _auc(labels[valid], oriented[valid]),
+                                        "direction": int(direction)})
 
         window_df = pd.DataFrame(window_rows)
         lead_df = pd.concat([frame for frame in lead_frames if not frame.empty], ignore_index=True) if lead_frames else pd.DataFrame()
