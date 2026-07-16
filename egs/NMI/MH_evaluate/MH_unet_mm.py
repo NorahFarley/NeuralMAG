@@ -33,11 +33,15 @@ from libs.misc import Culist, MaskTp, spin_prepare, winding_density
 import libs.MAG2305 as MAG2305
 from libs.Unet import UNet
 from plots import (
+    compute_training_texture_metrics,
     plot_error_summary,
     plot_error_vs_transition_proximity,
+    plot_exchange_energy_density_vs_hext,
     plot_fields_summary,
     plot_full_energy_summary,
+    plot_magnetization_gradient_vs_hext,
     plot_performance_summary,
+    plot_training_winding_density_vs_hext,
 )
 
 
@@ -304,6 +308,18 @@ def main() -> None:
     full_fft: Dict[str, list] = {key: [] for key in ('demag', 'anis', 'excha', 'exter', 'total', 'iters', 'vortices', 'mz', 'time')}
     full_unet: Dict[str, list] = {key: [] for key in ('demag', 'anis', 'excha', 'exter', 'total', 'iters', 'vortices', 'mz', 'time')}
 
+    texture_keys = ('gradient_training_grid_mean',
+                    'gradient_active_mean',
+                    'gradient_interior_mean',
+                    'exchange_proxy_training_mean',
+                    'winding_training_abs_mean',
+                    'winding_training_abs_max',
+                    'exchange_energy_density',
+                    'active_cell_count',
+                    'interior_layer0_cell_count')
+    texture_fft: Dict[str, list] = {key: [] for key in texture_keys}
+    texture_unet: Dict[str, list] = {key: [] for key in texture_keys}
+
     spin_mm = film_fft.Spin.detach().cpu().numpy().copy()
     spin_un = film_unet.Spin.detach().cpu().numpy().copy()
 
@@ -328,6 +344,16 @@ def main() -> None:
 
         film_fft.GetEnergy_detailed(Hext=hext_vector)
         film_unet.GetEnergy_detailed(Hext=hext_vector)
+
+        fft_texture = compute_training_texture_metrics(
+            film_fft.Spin, exchange_energy=film_fft.Energy_excha
+        )
+        unet_texture = compute_training_texture_metrics(
+            film_unet.Spin, exchange_energy=film_unet.Energy_excha
+        )
+        for key in texture_keys:
+            texture_fft[key].append(fft_texture[key])
+            texture_unet[key].append(unet_texture[key])
 
         fft_spin_for_winding = film_fft.Spin.permute(3, 0, 1, 2)[:, :, :, 0].unsqueeze(0)
         unet_spin_for_winding = film_unet.Spin.permute(3, 0, 1, 2)[:, :, :, 0].unsqueeze(0)
@@ -426,6 +452,9 @@ def main() -> None:
         "exchange": (0.0, 400.0),
         "anisotropy": (0.0, 400.0),})
         plot_fields_summary(general_title_summary, str(summary_dir), hext_range, he_fft_plot, he_unet_plot, ha_fft_plot, ha_unet_plot, hd_fft_plot, hd_unet_plot, heff_fft_plot, heff_unet_plot)
+        plot_magnetization_gradient_vs_hext(general_title_summary, str(summary_dir), hext_range, texture_fft, texture_unet)
+        plot_training_winding_density_vs_hext(general_title_summary, str(summary_dir), hext_range, texture_fft, texture_unet)
+        plot_exchange_energy_density_vs_hext(general_title_summary, str(summary_dir), hext_range, texture_fft, texture_unet)
         # plot_error_correlations(general_title_summary, str(summary_dir), hd_error_mae, he_error_mae, ha_error_mae, spin_error_mae, Hext_range=hext_range)
 
     if args.skip_parts_2_to_5:

@@ -20,6 +20,378 @@ from libs.misc import Culist, MaskTp, spin_prepare, winding_density
 import libs.MAG2305 as MAG2305
 from libs.Unet import UNet
 
+# ============================================================================
+# M-H TEXTURE DIAGNOSTICS
+# ============================================================================
+
+def _layer0_training_tensor(spin):
+    """Return layer 0 as ``(batch, 3, Nx, Ny)`` without changing values.
+
+    The gradient and winding losses were trained on the first three input
+    channels, which correspond to ``(m_x, m_y, m_z)`` of layer 0.
+    """
+    tensor = spin if isinstance(spin, torch.Tensor) else torch.as_tensor(spin)
+
+    if tensor.ndim != 4:
+        raise ValueError(
+            "spin must have shape (Nx, Ny, Nz, 3) or (batch, channels, Nx, Ny); "
+            f"received {tuple(tensor.shape)}."
+        )
+
+    # Already channel-first: (batch, channels, Nx, Ny).
+    if tensor.shape[1] >= 3 and tensor.shape[-1] != 3:
+        return tensor[:, :3]
+
+    # MAG2305 layout: (Nx, Ny, Nz, 3).
+    if tensor.shape[-1] == 3:
+        if tensor.shape[2] < 1:
+            raise ValueError("The spin tensor contains no magnetic layers.")
+        return tensor[:, :, 0, :].permute(2, 0, 1).unsqueeze(0)
+
+    # Covers channel-first grids whose Ny happens to equal 3.
+    if tensor.shape[1] >= 3:
+        return tensor[:, :3]
+
+    raise ValueError(
+        "Could not identify the three magnetization channels in spin with "
+        f"shape {tuple(tensor.shape)}."
+    )
+
+
+def _training_gradient_map(spin_channel_first):
+    """Reproduce the exact finite-difference map used by ``train.py``.
+
+    This intentionally uses grid-cell units (dx = dy = 1), centered
+    differences, and replicated values only at the outer rectangular array
+    boundary. It does not mask sample-shape boundaries before differentiating.
+    """
+    if spin_channel_first.ndim != 4 or spin_channel_first.shape[1] < 3:
+        raise ValueError("Expected spin shape (batch, >=3, Nx, Ny).")
+
+    grad_sq = torch.zeros_like(spin_channel_first[:, 0])
+    for component in range(3):
+        m = spin_channel_first[:, component]
+
+        m_xp = torch.roll(m, shifts=-1, dims=1)
+        m_xm = torch.roll(m, shifts=1, dims=1)
+        m_yp = torch.roll(m, shifts=-1, dims=2)
+        m_ym = torch.roll(m, shifts=1, dims=2)
+
+        m_xp[:, -1, :] = m[:, -1, :]
+        m_xm[:, 0, :] = m[:, 0, :]
+        m_yp[:, :, -1] = m[:, :, -1]
+        m_ym[:, :, 0] = m[:, :, 0]
+
+        dm_dx = (m_xp - m_xm) / 2.0
+        dm_dy = (m_yp - m_ym) / 2.0
+        grad_sq = grad_sq + dm_dx.square() + dm_dy.square()
+
+    return torch.sqrt(grad_sq)
+
+
+def _strict_interior_mask(active_mask):
+    """Select magnetic cells whose four in-plane neighbors are magnetic.
+
+    The rectangular array edge is always excluded. For masked samples, this
+    also removes the one-cell-thick geometric boundary around holes, triangles,
+    convex hulls, and other nonmagnetic regions.
+    """
+    if active_mask.ndim != 3:
+        raise ValueError("active_mask must have shape (batch, Nx, Ny).")
+
+    interior = torch.zeros_like(active_mask, dtype=torch.bool)
+    if active_mask.shape[1] < 3 or active_mask.shape[2] < 3:
+        return interior
+
+    interior[:, 1:-1, 1:-1] = (
+        active_mask[:, 1:-1, 1:-1]
+        & active_mask[:, :-2, 1:-1]
+        & active_mask[:, 2:, 1:-1]
+        & active_mask[:, 1:-1, :-2]
+        & active_mask[:, 1:-1, 2:]
+    )
+    return interior
+
+
+def _training_winding_map(spin_channel_first):
+    """Reproduce the local winding-density formula used during training."""
+    if spin_channel_first.ndim != 4 or spin_channel_first.shape[1] < 2:
+        raise ValueError("Expected spin shape (batch, >=2, Nx, Ny).")
+
+    mx = spin_channel_first[:, 0]
+    my = spin_channel_first[:, 1]
+
+    mx_xp = torch.roll(mx, shifts=-1, dims=1)
+    mx_xm = torch.roll(mx, shifts=1, dims=1)
+    mx_yp = torch.roll(mx, shifts=-1, dims=2)
+    mx_ym = torch.roll(mx, shifts=1, dims=2)
+
+    my_xp = torch.roll(my, shifts=-1, dims=1)
+    my_xm = torch.roll(my, shifts=1, dims=1)
+    my_yp = torch.roll(my, shifts=-1, dims=2)
+    my_ym = torch.roll(my, shifts=1, dims=2)
+
+    for plus, minus, original, axis in (
+        (mx_xp, mx_xm, mx, "x"),
+        (my_xp, my_xm, my, "x"),
+    ):
+        plus[:, -1, :] = original[:, -1, :]
+        minus[:, 0, :] = original[:, 0, :]
+
+    for plus, minus, original, axis in (
+        (mx_yp, mx_ym, mx, "y"),
+        (my_yp, my_ym, my, "y"),
+    ):
+        plus[:, :, -1] = original[:, :, -1]
+        minus[:, :, 0] = original[:, :, 0]
+
+    dmx_dx = (mx_xp - mx_xm) / 2.0
+    dmx_dy = (mx_yp - mx_ym) / 2.0
+    dmy_dx = (my_xp - my_xm) / 2.0
+    dmy_dy = (my_yp - my_ym) / 2.0
+    return (dmx_dx * dmy_dy - dmy_dx * dmx_dy) / np.pi
+
+
+def _selected_mean(values, mask):
+    selected = values[mask]
+    return float(selected.mean().item()) if selected.numel() else float("nan")
+
+
+def _selected_max(values, mask):
+    selected = values[mask]
+    return float(selected.max().item()) if selected.numel() else float("nan")
+
+
+@torch.no_grad()
+def compute_training_texture_metrics(spin, exchange_energy=None, active_threshold=1.0e-12):
+    """Compute the scalar histories used by the new M-H summary plots.
+
+    Parameters
+    ----------
+    spin:
+        MAG2305 spin tensor ``(Nx, Ny, Nz, 3)`` or a channel-first training
+        tensor ``(batch, channels, Nx, Ny)``.
+    exchange_energy:
+        Optional MAG2305 ``Energy_excha`` value. Because MAG2305 sums a
+        per-cell cgs exchange-energy density, dividing by the number of active
+        cells gives the mean exchange-energy density in erg/cm^3.
+
+    Returns
+    -------
+    dict
+        Exact training-map summaries, boundary-controlled gradient summaries,
+        winding-density summaries, and exchange-energy summaries.
+    """
+    tensor = spin if isinstance(spin, torch.Tensor) else torch.as_tensor(spin)
+    layer0 = _layer0_training_tensor(tensor)
+    active = torch.linalg.vector_norm(layer0[:, :3], dim=1) > active_threshold
+    interior = _strict_interior_mask(active)
+
+    gradient = _training_gradient_map(layer0)
+    winding_abs = _training_winding_map(layer0).abs()
+
+    if tensor.ndim == 4 and tensor.shape[-1] == 3:
+        full_active_count = int(
+            (torch.linalg.vector_norm(tensor, dim=-1) > active_threshold).sum().item()
+        )
+    else:
+        full_active_count = int(active.sum().item())
+
+    exchange_density = float("nan")
+    if exchange_energy is not None and full_active_count > 0:
+        if isinstance(exchange_energy, torch.Tensor):
+            exchange_value = float(exchange_energy.detach().cpu().item())
+        else:
+            exchange_value = float(exchange_energy)
+        exchange_density = exchange_value / full_active_count
+
+    return {
+        # Exact map used by the original gradient-weighted training loss.
+        "gradient_training_grid_mean": float(gradient.mean().item()),
+        # Same map, but average only over magnetic center cells.
+        "gradient_active_mean": _selected_mean(gradient, active),
+        # Same map and stencil, restricted to cells with four magnetic neighbors.
+        "gradient_interior_mean": _selected_mean(gradient, interior),
+        # Exact proxy used by loss_type == "exchange_energy" in train.py.
+        "exchange_proxy_training_mean": float(gradient.square().mean().item()),
+        # Local winding density used by loss_type == "winding" in train.py.
+        "winding_training_abs_mean": _selected_mean(winding_abs, active),
+        "winding_training_abs_max": _selected_max(winding_abs, active),
+        # MAG2305 physical exchange-energy density averaged over all active layers.
+        "exchange_energy_density": exchange_density,
+        "active_cell_count": full_active_count,
+        "interior_layer0_cell_count": int(interior.sum().item()),
+    }
+
+
+def _set_reversed_hext_axis(ax, Hext_range):
+    values = np.asarray(Hext_range, dtype=float)
+    max_h = float(np.nanmax(values))
+    min_h = float(np.nanmin(values))
+    pad = 0.05 * (max_h - min_h if max_h != min_h else 1.0)
+    ax.set_xlim(max_h + pad, min_h - pad)
+
+
+def plot_magnetization_gradient_vs_hext(
+    general_title_summary,
+    save_path_summary,
+    Hext_range,
+    gradient_fft,
+    gradient_unet,
+):
+    """Plot three boundary treatments of the training gradient map vs Hext."""
+    folder = os.path.join(save_path_summary, "summary_plots")
+    os.makedirs(folder, exist_ok=True)
+
+    fig, axs = plt.subplots(1, 3, figsize=(19, 6.2), sharex=True)
+    fig.suptitle(
+        "Magnetization-Gradient Definitions Across the M-H Sweep\n\n"
+        + general_title_summary,
+        fontsize=13,
+        fontweight="bold",
+    )
+
+    panels = (
+        (
+            "gradient_training_grid_mean",
+            "Exact Training Map: Full-Grid Mean",
+            r"Mean $|\nabla m|$ [cell$^{-1}$]",
+            "Includes zero cells and sample-boundary gradients.",
+        ),
+        (
+            "gradient_active_mean",
+            "Exact Training Map: Magnetic Centers",
+            r"Mean $|\nabla m|$ [cell$^{-1}$]",
+            "Removes empty centers but retains magnetic boundary cells.",
+        ),
+        (
+            "gradient_interior_mean",
+            "Strict Magnetic Interior",
+            r"Mean $|\nabla m|$ [cell$^{-1}$]",
+            "Uses only cells with magnetic ±x and ±y neighbors.",
+        ),
+    )
+
+    for ax, (key, title, ylabel, subtitle) in zip(axs, panels):
+        ax.plot(Hext_range, gradient_fft[key], lw=2.3, label="FFT/LLG")
+        ax.plot(Hext_range, gradient_unet[key], lw=2.3, label="UNet/LLG")
+        ax.set_title(title + "\n" + subtitle, fontsize=10.5, fontweight="bold")
+        ax.set_xlabel(r"External Field $H_{ext}$ [Oe]")
+        ax.set_ylabel(ylabel)
+        _set_reversed_hext_axis(ax, Hext_range)
+        ax.grid(True, linestyle="--", alpha=0.4)
+        ax.legend(fontsize=9)
+
+    fig.tight_layout()
+    fig.savefig(
+        os.path.join(folder, "magnetization_gradient_definitions_vs_hext.png"),
+        dpi=300,
+        bbox_inches="tight",
+    )
+    plt.close(fig)
+
+
+def plot_training_winding_density_vs_hext(
+    general_title_summary,
+    save_path_summary,
+    Hext_range,
+    winding_fft,
+    winding_unet,
+):
+    """Plot scalar summaries of the exact local winding map used in training."""
+    folder = os.path.join(save_path_summary, "summary_plots")
+    os.makedirs(folder, exist_ok=True)
+
+    fig, axs = plt.subplots(1, 2, figsize=(14.5, 6.2), sharex=True)
+    fig.suptitle(
+        "Training Winding-Density Signal Across the M-H Sweep\n\n"
+        + general_title_summary,
+        fontsize=13,
+        fontweight="bold",
+    )
+
+    panels = (
+        (
+            "winding_training_abs_mean",
+            r"Mean Local Training Weight Signal $\langle |w| \rangle$",
+            r"Mean $|w|$ on magnetic cells",
+        ),
+        (
+            "winding_training_abs_max",
+            r"Peak Local Training Weight Signal $\max |w|$",
+            r"Maximum $|w|$ on magnetic cells",
+        ),
+    )
+
+    for ax, (key, title, ylabel) in zip(axs, panels):
+        ax.plot(Hext_range, winding_fft[key], lw=2.3, label="FFT/LLG")
+        ax.plot(Hext_range, winding_unet[key], lw=2.3, label="UNet/LLG")
+        ax.set_title(title, fontsize=11, fontweight="bold")
+        ax.set_xlabel(r"External Field $H_{ext}$ [Oe]")
+        ax.set_ylabel(ylabel)
+        _set_reversed_hext_axis(ax, Hext_range)
+        ax.grid(True, linestyle="--", alpha=0.4)
+        ax.legend(fontsize=9)
+
+    fig.tight_layout()
+    fig.savefig(
+        os.path.join(folder, "training_winding_density_vs_hext.png"),
+        dpi=300,
+        bbox_inches="tight",
+    )
+    plt.close(fig)
+
+
+def plot_exchange_energy_density_vs_hext(
+    general_title_summary,
+    save_path_summary,
+    Hext_range,
+    exchange_fft,
+    exchange_unet,
+):
+    """Compare the training exchange proxy with MAG2305 exchange density."""
+    folder = os.path.join(save_path_summary, "summary_plots")
+    os.makedirs(folder, exist_ok=True)
+
+    fig, axs = plt.subplots(1, 2, figsize=(14.5, 6.2), sharex=True)
+    fig.suptitle(
+        "Exchange-Energy Density Across the M-H Sweep\n\n"
+        + general_title_summary,
+        fontsize=13,
+        fontweight="bold",
+    )
+
+    panels = (
+        (
+            "exchange_proxy_training_mean",
+            r"Training Proxy: $\langle |\nabla m|^2 \rangle$",
+            r"Mean $|\nabla m|^2$ [cell$^{-2}$]",
+        ),
+        (
+            "exchange_energy_density",
+            "MAG2305 Mean Exchange-Energy Density",
+            r"Exchange-energy density [erg/cm$^3$]",
+        ),
+    )
+
+    for ax, (key, title, ylabel) in zip(axs, panels):
+        ax.plot(Hext_range, exchange_fft[key], lw=2.3, label="FFT/LLG")
+        ax.plot(Hext_range, exchange_unet[key], lw=2.3, label="UNet/LLG")
+        ax.set_title(title, fontsize=11, fontweight="bold")
+        ax.set_xlabel(r"External Field $H_{ext}$ [Oe]")
+        ax.set_ylabel(ylabel)
+        _set_reversed_hext_axis(ax, Hext_range)
+        ax.grid(True, linestyle="--", alpha=0.4)
+        ax.legend(fontsize=9)
+
+    fig.tight_layout()
+    fig.savefig(
+        os.path.join(folder, "exchange_energy_density_vs_hext.png"),
+        dpi=300,
+        bbox_inches="tight",
+    )
+    plt.close(fig)
+
 # =======================================================================
 # SUMMARY PLOTS (FINAL ENERGY PROFILES, PERFORMANCE METRICS, ETC.) 
 # =======================================================================
