@@ -33,15 +33,20 @@ from libs.misc import Culist, MaskTp, spin_prepare, winding_density
 import libs.MAG2305 as MAG2305
 from libs.Unet import UNet
 from plots import (
+    compute_training_gradient_change_rate_metrics,
     compute_training_texture_metrics,
     plot_error_summary,
     plot_error_vs_transition_proximity,
     plot_exchange_energy_density_vs_hext,
     plot_fields_summary,
     plot_full_energy_summary,
+    plot_gradient_change_rate_summary,
     plot_magnetization_gradient_vs_hext,
     plot_performance_summary,
     plot_training_winding_density_vs_hext,
+    plot_torque_summary,
+    plot_alignment_summary,
+    plot_transition_spatial_error_summary
 )
 
 
@@ -120,6 +125,34 @@ def _mean_field_magnitude(field: torch.Tensor, spin: torch.Tensor) -> float:
     selected = magnitude[active]
     return float(selected.mean().item()) if selected.numel() else float(magnitude.mean().item())
 
+def _mean_torque_magnitude(spin: torch.Tensor, field: torch.Tensor) -> float:
+    """Mean |m x H| over magnetized cells."""
+    active = torch.linalg.vector_norm(spin, dim=-1) > 1.0e-12
+    torque = torch.linalg.vector_norm(torch.cross(spin, field, dim=-1), dim=-1)
+    selected = torque[active]
+    return float(selected.mean().item()) if selected.numel() else float("nan")
+
+
+def _mean_alignment_cosine(spin: torch.Tensor, field: torch.Tensor) -> float:
+    """Mean cos(theta) between m and H over cells where both vectors are nonzero."""
+    eps = 1.0e-12
+    spin_norm = torch.linalg.vector_norm(spin, dim=-1)
+    field_norm = torch.linalg.vector_norm(field, dim=-1)
+    valid = (spin_norm > eps) & (field_norm > eps)
+    if not torch.any(valid):
+        return float("nan")
+
+    cosine = torch.sum(spin * field, dim=-1) / (spin_norm * field_norm + eps)
+    cosine = torch.clamp(cosine, -1.0, 1.0)
+    return float(cosine[valid].mean().item())
+
+def _mean_spatial_maps(maps: Sequence[np.ndarray]) -> np.ndarray:
+    """NaN-aware mean that keeps cells outside the magnetic sample as NaN."""
+    stack = np.stack([np.asarray(array, dtype=float) for array in maps], axis=0)
+    valid = np.isfinite(stack)
+    count = valid.sum(axis=0)
+    total = np.nansum(stack, axis=0)
+    return np.divide(total, count, out=np.full(total.shape, np.nan, dtype=float), where=count > 0,)
 
 def plot_results(nloop, spin_mm, spin_un, itern1, itern2, Hd_mm, Hd_un, x_plot, y1_plot, y2_plot, Hext_range, 
                  error1_rcd, error2_rcd, save_path_iteration, general_title_iteration):
@@ -320,6 +353,24 @@ def main() -> None:
     texture_fft: Dict[str, list] = {key: [] for key in texture_keys}
     texture_unet: Dict[str, list] = {key: [] for key in texture_keys}
 
+    gradient_change_keys = ('gradient_spatial_rate_mean', 'exchange_proxy_spatial_rate_mean', 
+                            'gradient_loop_to_loop_rate_mean', 'exchange_proxy_loop_to_loop_rate_mean',)
+    gradient_change_fft: Dict[str, list] = {key: [] for key in gradient_change_keys}
+    gradient_change_unet: Dict[str, list] = {key: [] for key in gradient_change_keys}
+
+    field_keys = ('he', 'ha', 'hd', 'heff')
+    torque_fft: Dict[str, list] = {key: [] for key in field_keys}
+    torque_unet: Dict[str, list] = {key: [] for key in field_keys}
+    alignment_fft: Dict[str, list] = {key: [] for key in field_keys}
+    alignment_unet: Dict[str, list] = {key: [] for key in field_keys}
+
+    # One layer-0 spatial map is stored for every converged Hext step.
+    # These are aggregated later only at detected transition-event peak steps.
+    hd_mae_maps: list[np.ndarray] = []
+    spin_mae_maps: list[np.ndarray] = []
+    fft_winding_abs_maps: list[np.ndarray] = []
+    fft_core_occupancy_maps: list[np.ndarray] = []
+
     spin_mm = film_fft.Spin.detach().cpu().numpy().copy()
     spin_un = film_unet.Spin.detach().cpu().numpy().copy()
 
@@ -345,15 +396,24 @@ def main() -> None:
         film_fft.GetEnergy_detailed(Hext=hext_vector)
         film_unet.GetEnergy_detailed(Hext=hext_vector)
 
-        fft_texture = compute_training_texture_metrics(
-            film_fft.Spin, exchange_energy=film_fft.Energy_excha
-        )
-        unet_texture = compute_training_texture_metrics(
-            film_unet.Spin, exchange_energy=film_unet.Energy_excha
-        )
+        fft_texture = compute_training_texture_metrics(film_fft.Spin, exchange_energy=film_fft.Energy_excha)
+        unet_texture = compute_training_texture_metrics(film_unet.Spin, exchange_energy=film_unet.Energy_excha)
         for key in texture_keys:
             texture_fft[key].append(fft_texture[key])
             texture_unet[key].append(unet_texture[key])
+        previous_fft_tensor = torch.as_tensor(previous_fft, device=film_fft.Spin.device, dtype=film_fft.Spin.dtype)
+        previous_unet_tensor = torch.as_tensor(previous_unet, device=film_unet.Spin.device, dtype=film_unet.Spin.dtype)
+        fft_gradient_change = compute_training_gradient_change_rate_metrics(
+            film_fft.Spin,
+            previous_spin=None if nloop == 0 else previous_fft_tensor,
+        )
+        unet_gradient_change = compute_training_gradient_change_rate_metrics(
+            film_unet.Spin,
+            previous_spin=None if nloop == 0 else previous_unet_tensor,
+        )
+        for key in gradient_change_keys:
+            gradient_change_fft[key].append(fft_gradient_change[key])
+            gradient_change_unet[key].append(unet_gradient_change[key])
 
         fft_spin_for_winding = film_fft.Spin.permute(3, 0, 1, 2)[:, :, :, 0].unsqueeze(0)
         unet_spin_for_winding = film_unet.Spin.permute(3, 0, 1, 2)[:, :, :, 0].unsqueeze(0)
@@ -364,6 +424,38 @@ def main() -> None:
 
         unet_topology = analyze_winding_components(unet_winding_map, relative_threshold=args.core_relative_threshold, absolute_threshold=args.core_absolute_threshold,
                                                    min_cells=args.core_min_cells, min_abs_charge=args.core_min_abs_charge)
+
+        field_pairs = {
+            'he': (film_fft.He, film_unet.He),
+            'ha': (film_fft.Ha, film_unet.Ha),
+            'hd': (film_fft.Hd, film_unet.Hd),
+            'heff': (film_fft.Heff, film_unet.Heff),
+        }
+        for key, (fft_field, unet_field) in field_pairs.items():
+            torque_fft[key].append(_mean_torque_magnitude(film_fft.Spin, fft_field))
+            torque_unet[key].append(_mean_torque_magnitude(film_unet.Spin, unet_field))
+            alignment_fft[key].append(_mean_alignment_cosine(film_fft.Spin, fft_field))
+            alignment_unet[key].append(_mean_alignment_cosine(film_unet.Spin, unet_field))
+
+        # Spatial MAE maps use layer 0 to match the original per-Hext diagnostic.
+        active_layer0 = torch.linalg.vector_norm(film_fft.Spin[:, :, 0, :], dim=-1) > 1.0e-12
+        hd_mae_layer0 = torch.abs(film_unet.Hd[:, :, 0, :] - film_fft.Hd[:, :, 0, :]).mean(dim=-1)
+        spin_mae_layer0 = torch.abs(film_unet.Spin[:, :, 0, :] - film_fft.Spin[:, :, 0, :]).mean(dim=-1)
+
+        hd_mae_layer0 = torch.where(active_layer0, hd_mae_layer0, torch.nan)
+        spin_mae_layer0 = torch.where(active_layer0, spin_mae_layer0, torch.nan)
+        hd_mae_maps.append(hd_mae_layer0.detach().cpu().numpy())
+        spin_mae_maps.append(spin_mae_layer0.detach().cpu().numpy())
+
+        winding_abs_layer0 = np.abs(np.squeeze(fft_winding_map.detach().cpu().numpy())).astype(float)
+        active_layer0_np = active_layer0.detach().cpu().numpy()
+        winding_abs_layer0[~active_layer0_np] = np.nan
+        fft_winding_abs_maps.append(winding_abs_layer0)
+
+        core_threshold = float(fft_topology['core_threshold_used'])
+        core_occupancy = (winding_abs_layer0 >= core_threshold).astype(float)
+        core_occupancy[~active_layer0_np] = np.nan
+        fft_core_occupancy_maps.append(core_occupancy)
 
         snapshot = recorder.capture(mh_step=nloop,
                                     hext_scalar=hext_scalar,
@@ -455,6 +547,9 @@ def main() -> None:
         plot_magnetization_gradient_vs_hext(general_title_summary, str(summary_dir), hext_range, texture_fft, texture_unet)
         plot_training_winding_density_vs_hext(general_title_summary, str(summary_dir), hext_range, texture_fft, texture_unet)
         plot_exchange_energy_density_vs_hext(general_title_summary, str(summary_dir), hext_range, texture_fft, texture_unet)
+        plot_gradient_change_rate_summary(general_title_summary, str(summary_dir), hext_range, gradient_change_fft, gradient_change_unet)
+        plot_torque_summary(general_title_summary, str(summary_dir), hext_range, torque_fft, torque_unet)
+        plot_alignment_summary(general_title_summary, str(summary_dir), hext_range, alignment_fft, alignment_unet)
         # plot_error_correlations(general_title_summary, str(summary_dir), hd_error_mae, he_error_mae, ha_error_mae, spin_error_mae, Hext_range=hext_range)
 
     if args.skip_parts_2_to_5:
@@ -469,6 +564,42 @@ def main() -> None:
         for event_type in ('both', 'nucleation', 'annihilation'):
             plot_error_vs_transition_proximity(general_title_summary, str(summary_dir), spin_error_mae, 
                                                labeled_df['fft_winding_abs'].to_numpy(dtype=float), event_type=event_type)
+
+        # Use one peak step per detected event. This prevents long events from
+        # receiving more weight than short events in the spatial average.
+        if not events_df.empty and 'peak_step' in events_df:
+            step_to_history_index = {
+                int(step): index
+                for index, step in enumerate(physics_df['mh_step'].to_numpy(dtype=int))}
+            transition_peak_indices = [
+                step_to_history_index[int(step)]
+                for step in events_df['peak_step'].to_numpy(dtype=int)
+                if int(step) in step_to_history_index]
+
+            if transition_peak_indices:
+                hd_transition_mean = _mean_spatial_maps(
+                    [hd_mae_maps[index] for index in transition_peak_indices])
+                spin_transition_mean = _mean_spatial_maps(
+                    [spin_mae_maps[index] for index in transition_peak_indices])
+                winding_transition_mean = _mean_spatial_maps(
+                    [fft_winding_abs_maps[index] for index in transition_peak_indices])
+                core_occupancy_fraction = _mean_spatial_maps(
+                    [fft_core_occupancy_maps[index] for index in transition_peak_indices])
+
+                plot_transition_spatial_error_summary(
+                    general_title_summary=general_title_summary,
+                    save_path_summary=str(summary_dir),
+                    hd_error_map=hd_transition_mean,
+                    spin_error_map=spin_transition_mean,
+                    winding_context_map=winding_transition_mean,
+                    core_occupancy_map=core_occupancy_fraction,
+                    transition_count=len(transition_peak_indices),
+                )
+            else:
+                print('[summary_plots] No valid transition peak indices were available; spatial transition summary skipped.')
+        else:
+            print('[summary_plots] No transition events were detected; spatial transition summary skipped.')
+
 
     part3_directory = summary_dir / "leading_indicator_analysis"
     indicator_analyzer = LeadingIndicatorAnalyzer(labeled_df, events_df=events_df, error_targets=('spin_mae', 'hd_mae'), 
