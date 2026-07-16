@@ -398,19 +398,19 @@ def main() -> None:
 
         fft_texture = compute_training_texture_metrics(film_fft.Spin, exchange_energy=film_fft.Energy_excha)
         unet_texture = compute_training_texture_metrics(film_unet.Spin, exchange_energy=film_unet.Energy_excha)
+        
         for key in texture_keys:
             texture_fft[key].append(fft_texture[key])
             texture_unet[key].append(unet_texture[key])
+
         previous_fft_tensor = torch.as_tensor(previous_fft, device=film_fft.Spin.device, dtype=film_fft.Spin.dtype)
         previous_unet_tensor = torch.as_tensor(previous_unet, device=film_unet.Spin.device, dtype=film_unet.Spin.dtype)
+
         fft_gradient_change = compute_training_gradient_change_rate_metrics(
-            film_fft.Spin,
-            previous_spin=None if nloop == 0 else previous_fft_tensor,
-        )
+            film_fft.Spin,previous_spin=None if nloop == 0 else previous_fft_tensor,)
         unet_gradient_change = compute_training_gradient_change_rate_metrics(
-            film_unet.Spin,
-            previous_spin=None if nloop == 0 else previous_unet_tensor,
-        )
+            film_unet.Spin, previous_spin=None if nloop == 0 else previous_unet_tensor,)
+        
         for key in gradient_change_keys:
             gradient_change_fft[key].append(fft_gradient_change[key])
             gradient_change_unet[key].append(unet_gradient_change[key])
@@ -419,18 +419,16 @@ def main() -> None:
         unet_spin_for_winding = film_unet.Spin.permute(3, 0, 1, 2)[:, :, :, 0].unsqueeze(0)
         fft_winding_map, fft_winding_abs, fft_winding_sum = winding_density(fft_spin_for_winding)
         unet_winding_map, unet_winding_abs, unet_winding_sum = winding_density(unet_spin_for_winding)
-        fft_topology = analyze_winding_components(fft_winding_map, relative_threshold=args.core_relative_threshold, absolute_threshold=args.core_absolute_threshold,
-                                                  min_cells=args.core_min_cells, min_abs_charge=args.core_min_abs_charge)
+        fft_topology = analyze_winding_components(
+            fft_winding_map, relative_threshold=args.core_relative_threshold, absolute_threshold=args.core_absolute_threshold,
+            min_cells=args.core_min_cells, min_abs_charge=args.core_min_abs_charge)
 
-        unet_topology = analyze_winding_components(unet_winding_map, relative_threshold=args.core_relative_threshold, absolute_threshold=args.core_absolute_threshold,
-                                                   min_cells=args.core_min_cells, min_abs_charge=args.core_min_abs_charge)
+        unet_topology = analyze_winding_components(
+            unet_winding_map, relative_threshold=args.core_relative_threshold, absolute_threshold=args.core_absolute_threshold,
+            min_cells=args.core_min_cells, min_abs_charge=args.core_min_abs_charge)
 
-        field_pairs = {
-            'he': (film_fft.He, film_unet.He),
-            'ha': (film_fft.Ha, film_unet.Ha),
-            'hd': (film_fft.Hd, film_unet.Hd),
-            'heff': (film_fft.Heff, film_unet.Heff),
-        }
+        field_pairs = {'he': (film_fft.He, film_unet.He), 'ha': (film_fft.Ha, film_unet.Ha),
+                       'hd': (film_fft.Hd, film_unet.Hd), 'heff': (film_fft.Heff, film_unet.Heff),}
         for key, (fft_field, unet_field) in field_pairs.items():
             torque_fft[key].append(_mean_torque_magnitude(film_fft.Spin, fft_field))
             torque_unet[key].append(_mean_torque_magnitude(film_unet.Spin, unet_field))
@@ -457,25 +455,17 @@ def main() -> None:
         core_occupancy[~active_layer0_np] = np.nan
         fft_core_occupancy_maps.append(core_occupancy)
 
-        snapshot = recorder.capture(mh_step=nloop,
-                                    hext_scalar=hext_scalar,
-                                    hext_vector=hext_vector,
-                                    projection_direction=sweep_direction,
-                                    film_fft=film_fft,
-                                    film_unet=film_unet,
-                                    fft_winding_abs=fft_winding_abs,
-                                    fft_winding_sum=fft_winding_sum,
-                                    unet_winding_abs=unet_winding_abs,
-                                    unet_winding_sum=unet_winding_sum,
-                                    fft_topology=fft_topology,
-                                    unet_topology=unet_topology,
-                                    fft_iterations=iterations_fft,
-                                    unet_iterations=iterations_unet,
-                                    fft_final_convergence_error=final_fft_error,
-                                    unet_final_convergence_error=final_unet_error,
-                                    fft_runtime_seconds=fft_runtime,
-                                    unet_runtime_seconds=unet_runtime,
-                                    cell_count=cell_count)
+        snapshot = recorder.capture(
+            mh_step=nloop, hext_scalar=hext_scalar,
+            hext_vector=hext_vector, projection_direction=sweep_direction,
+            film_fft=film_fft, film_unet=film_unet,
+            fft_winding_abs=fft_winding_abs, fft_winding_sum=fft_winding_sum,
+            unet_winding_abs=unet_winding_abs, unet_winding_sum=unet_winding_sum,
+            fft_topology=fft_topology, unet_topology=unet_topology,
+            fft_iterations=iterations_fft, unet_iterations=iterations_unet,
+            fft_final_convergence_error=final_fft_error, unet_final_convergence_error=final_unet_error,
+            fft_runtime_seconds=fft_runtime, unet_runtime_seconds=unet_runtime,
+            cell_count=cell_count)
 
         spin_mm = film_fft.Spin.detach().cpu().numpy()
         spin_un = film_unet.Spin.detach().cpu().numpy()
@@ -513,9 +503,9 @@ def main() -> None:
 
         title = (general_title_summary+ f"Loop: {nloop} | Hext = {hext_scalar:.1f} Oe | Iterations: FFT [{iterations_fft}] | UNet [{iterations_unet}]")
 
-        plot_results(nloop=nloop, spin_mm=spin_mm, spin_un=spin_un, itern1=iterations_fft, itern2=iterations_unet, Hd_mm=hd_mm, Hd_un=hd_un,
-                         x_plot=x_plot, y1_plot=y_fft, y2_plot=y_unet, Hext_range=hext_range, error1_rcd=error_fft, error2_rcd=error_unet, save_path_iteration=str(original_plot_dir),
-                         general_title_iteration=title)
+        plot_results(nloop=nloop, spin_mm=spin_mm, spin_un=spin_un, itern1=iterations_fft, itern2=iterations_unet, Hd_mm=hd_mm, 
+                     Hd_un=hd_un, x_plot=x_plot, y1_plot=y_fft, y2_plot=y_unet, Hext_range=hext_range, error1_rcd=error_fft, 
+                     error2_rcd=error_unet, save_path_iteration=str(original_plot_dir), general_title_iteration=title)
 
         if np.isclose(hext_scalar, 0.0):
             np.save(output_dir / "Mr_spin_mm.npy", spin_mm)
@@ -535,14 +525,12 @@ def main() -> None:
     np.save(output_dir / "trajectory_shift_mae.npy", np.asarray(spin_error_mae))
     print(f"Saved {len(physics_df)} converged physics snapshots to {output_dir / 'physics_snapshots.csv'}")
 
+    y_limits={"hd": (0.0, 400.0), "trajectory": (0.0, 0.75), "exchange": (0.0, 400.0), "anisotropy": (0.0, 400.0),}
+
     if not args.skip_summary_plots:
         plot_full_energy_summary(general_title_summary, str(summary_dir), full_fft, full_unet, hext_range)
         plot_performance_summary(general_title_summary, str(summary_dir), full_fft, full_unet, hext_range)
-        plot_error_summary(general_title_summary, str(summary_dir), hext_range, hd_error_mae, spin_error_mae, he_error_mae, ha_error_mae, y_limits={
-        "hd": (0.0, 400.0),
-        "trajectory": (0.0, 0.75),
-        "exchange": (0.0, 400.0),
-        "anisotropy": (0.0, 400.0),})
+        plot_error_summary(general_title_summary, str(summary_dir), hext_range, hd_error_mae, spin_error_mae, he_error_mae, ha_error_mae, y_limits=y_limits)
         plot_fields_summary(general_title_summary, str(summary_dir), hext_range, he_fft_plot, he_unet_plot, ha_fft_plot, ha_unet_plot, hd_fft_plot, hd_unet_plot, heff_fft_plot, heff_unet_plot)
         plot_magnetization_gradient_vs_hext(general_title_summary, str(summary_dir), hext_range, texture_fft, texture_unet)
         plot_training_winding_density_vs_hext(general_title_summary, str(summary_dir), hext_range, texture_fft, texture_unet)
@@ -562,39 +550,24 @@ def main() -> None:
 
     if not args.skip_summary_plots and 'fft_winding_abs' in labeled_df:
         for event_type in ('both', 'nucleation', 'annihilation'):
-            plot_error_vs_transition_proximity(general_title_summary, str(summary_dir), spin_error_mae, 
-                                               labeled_df['fft_winding_abs'].to_numpy(dtype=float), event_type=event_type)
+            plot_error_vs_transition_proximity(general_title_summary, str(summary_dir), spin_error_mae, labeled_df['fft_winding_abs'].to_numpy(dtype=float), event_type=event_type)
 
         # Use one peak step per detected event. This prevents long events from
         # receiving more weight than short events in the spatial average.
         if not events_df.empty and 'peak_step' in events_df:
-            step_to_history_index = {
-                int(step): index
-                for index, step in enumerate(physics_df['mh_step'].to_numpy(dtype=int))}
-            transition_peak_indices = [
-                step_to_history_index[int(step)]
-                for step in events_df['peak_step'].to_numpy(dtype=int)
-                if int(step) in step_to_history_index]
+            step_to_history_index = {int(step): index for index, step in enumerate(physics_df['mh_step'].to_numpy(dtype=int))}
+            transition_peak_indices = [step_to_history_index[int(step)] for step in events_df['peak_step'].to_numpy(dtype=int) if int(step) in step_to_history_index]
 
             if transition_peak_indices:
-                hd_transition_mean = _mean_spatial_maps(
-                    [hd_mae_maps[index] for index in transition_peak_indices])
-                spin_transition_mean = _mean_spatial_maps(
-                    [spin_mae_maps[index] for index in transition_peak_indices])
-                winding_transition_mean = _mean_spatial_maps(
-                    [fft_winding_abs_maps[index] for index in transition_peak_indices])
-                core_occupancy_fraction = _mean_spatial_maps(
-                    [fft_core_occupancy_maps[index] for index in transition_peak_indices])
+                hd_transition_mean = _mean_spatial_maps([hd_mae_maps[index] for index in transition_peak_indices])
+                spin_transition_mean = _mean_spatial_maps([spin_mae_maps[index] for index in transition_peak_indices])
+                winding_transition_mean = _mean_spatial_maps([fft_winding_abs_maps[index] for index in transition_peak_indices])
+                core_occupancy_fraction = _mean_spatial_maps([fft_core_occupancy_maps[index] for index in transition_peak_indices])
 
-                plot_transition_spatial_error_summary(
-                    general_title_summary=general_title_summary,
-                    save_path_summary=str(summary_dir),
-                    hd_error_map=hd_transition_mean,
-                    spin_error_map=spin_transition_mean,
-                    winding_context_map=winding_transition_mean,
-                    core_occupancy_map=core_occupancy_fraction,
-                    transition_count=len(transition_peak_indices),
-                )
+                plot_transition_spatial_error_summary(general_title_summary=general_title_summary, save_path_summary=str(summary_dir), 
+                                                      hd_error_map=hd_transition_mean, spin_error_map=spin_transition_mean, 
+                                                      winding_context_map=winding_transition_mean, core_occupancy_map=core_occupancy_fraction, 
+                                                      transition_count=len(transition_peak_indices),)
             else:
                 print('[summary_plots] No valid transition peak indices were available; spatial transition summary skipped.')
         else:
@@ -602,62 +575,46 @@ def main() -> None:
 
 
     part3_directory = summary_dir / "leading_indicator_analysis"
-    indicator_analyzer = LeadingIndicatorAnalyzer(labeled_df, events_df=events_df, error_targets=('spin_mae', 'hd_mae'), 
-                                                  pretransition_windows=(3, 5, 10, 20), primary_window=args.indicator_primary_window, 
-                                                  max_lag=args.indicator_max_lag, lead_z_threshold=args.indicator_lead_z_threshold,
-                                                  post_event_exclusion=args.indicator_post_event_exclusion, n_permutations=args.indicator_permutations, 
-                                                  n_bootstrap=args.indicator_bootstrap, random_seed=args.indicator_random_seed)
+    indicator_analyzer = LeadingIndicatorAnalyzer(
+        labeled_df, events_df=events_df, error_targets=('spin_mae', 'hd_mae'), pretransition_windows=(3, 5, 10, 20), 
+        primary_window=args.indicator_primary_window, max_lag=args.indicator_max_lag, lead_z_threshold=args.indicator_lead_z_threshold,
+        post_event_exclusion=args.indicator_post_event_exclusion, n_permutations=args.indicator_permutations, 
+        n_bootstrap=args.indicator_bootstrap, random_seed=args.indicator_random_seed)
     
     indicator_ranking = indicator_analyzer.run(part3_directory, general_title_summary, top_n=args.indicator_top_n)
 
     publication_formats = tuple(item.strip() for item in args.publication_formats.split(',') if item.strip())
-    publication_generator = PublicationFigureGenerator(labeled_df, events_df, indicator_ranking, primary_window=args.indicator_primary_window,
-                                                       top_n=args.publication_top_n, pre_steps=args.publication_pre_steps, post_steps=args.publication_post_steps,
-                                                       dpi=args.publication_dpi, formats=publication_formats, lead_z_threshold=args.indicator_lead_z_threshold)
+    publication_generator = PublicationFigureGenerator(
+        labeled_df, events_df, indicator_ranking, primary_window=args.indicator_primary_window, top_n=args.publication_top_n, 
+        pre_steps=args.publication_pre_steps, post_steps=args.publication_post_steps, dpi=args.publication_dpi, 
+        formats=publication_formats, lead_z_threshold=args.indicator_lead_z_threshold)
+    
     publication_generator.run(summary_dir / "publication_figures", general_title_summary)
 
     run_metadata: Dict[str, Any] = {
-        'run_label': args.run_label,
-        'grid_width': args.w,
-        'layers': args.layers,
-        'cell_size_nm': args.cell_size,
-        'Ms_emu_per_cc': args.Ms,
-        'Ax_erg_per_cm': args.Ax,
-        'Ku_erg_per_cc': args.Ku,
-        'Kvec': list(args.Kvec),
-        'dtime_seconds': args.dtime,
-        'damping': args.damping,
-        'error_min': args.error_min,
-        'max_iter': args.max_iter,
-        'mask': str(args.mask),
-        'loss_type': args.loss_type,
-        'model_name': args.model_name,
-        'spin_split': args.spin_split,
-        'rand_seed': args.rand_seed,
-        'hext_start_oe': args.hext_start,
-        'hext_end_oe': args.hext_end,
-        'hext_steps': args.hext_steps,
-        'field_angle_radians': args.field_angle_radians,
-        'core_relative_threshold': args.core_relative_threshold,
-        'core_absolute_threshold': args.core_absolute_threshold,
-        'core_min_cells': args.core_min_cells,
-        'core_min_abs_charge': args.core_min_abs_charge,
-        'transition_merge_gap': args.transition_merge_gap,
-        'transition_winding_tolerance': args.transition_winding_tolerance,
-        'transition_m_z_threshold': args.transition_m_z_threshold,
-        'transition_min_m_change': args.transition_min_m_change,
-        'indicator_primary_window': args.indicator_primary_window,
-        'indicator_max_lag': args.indicator_max_lag,
-        'indicator_permutations': args.indicator_permutations,
-        'indicator_bootstrap': args.indicator_bootstrap,
-        'checkpoint_path': str(checkpoint_path),
-        'evaluation_script_path': str(Path(__file__).resolve()),
-        'searcher_path': str((Path(__file__).resolve().parent / 'searcher.py')),}
+        'run_label': args.run_label, 'grid_width': args.w, 
+        'layers': args.layers, 'cell_size_nm': args.cell_size, 
+        'Ms_emu_per_cc': args.Ms, 'Ax_erg_per_cm': args.Ax,
+        'Ku_erg_per_cc': args.Ku, 'Kvec': list(args.Kvec), 
+        'dtime_seconds': args.dtime, 'damping': args.damping, 
+        'error_min': args.error_min, 'max_iter': args.max_iter,
+        'mask': str(args.mask), 'loss_type': args.loss_type, 
+        'model_name': args.model_name, 'spin_split': args.spin_split, 
+        'rand_seed': args.rand_seed, 'hext_start_oe': args.hext_start,
+        'hext_end_oe': args.hext_end, 'hext_steps': args.hext_steps, 
+        'field_angle_radians': args.field_angle_radians, 'core_relative_threshold': args.core_relative_threshold, 
+        'core_absolute_threshold': args.core_absolute_threshold, 'core_min_cells': args.core_min_cells,
+        'core_min_abs_charge': args.core_min_abs_charge, 'transition_merge_gap': args.transition_merge_gap, 
+        'transition_winding_tolerance': args.transition_winding_tolerance, 'transition_m_z_threshold': args.transition_m_z_threshold, 
+        'transition_min_m_change': args.transition_min_m_change, 'indicator_primary_window': args.indicator_primary_window,
+        'indicator_max_lag': args.indicator_max_lag, 'indicator_permutations': args.indicator_permutations, 
+        'indicator_bootstrap': args.indicator_bootstrap, 'checkpoint_path': str(checkpoint_path), 
+        'evaluation_script_path': str(Path(__file__).resolve()), 'searcher_path': str((Path(__file__).resolve().parent / 'searcher.py')),}
 
     manuscript_formats = tuple(item.strip() for item in args.manuscript_formats.split(',') if item.strip())
-    manuscript_generator = ManuscriptOutputGenerator(physics_df, labeled_df, events_df, indicator_ranking, part3_directory=part3_directory, 
-                                                     run_metadata=run_metadata, primary_window=args.indicator_primary_window, top_n=args.manuscript_top_n, 
-                                                     formats=manuscript_formats)
+    manuscript_generator = ManuscriptOutputGenerator(
+        physics_df, labeled_df, events_df, indicator_ranking, part3_directory=part3_directory, run_metadata=run_metadata, 
+        primary_window=args.indicator_primary_window, top_n=args.manuscript_top_n, formats=manuscript_formats)
     manuscript_generator.run(summary_dir / "manuscript_outputs")
 
     if args.aggregate_root:

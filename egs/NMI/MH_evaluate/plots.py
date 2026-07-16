@@ -692,55 +692,81 @@ def plot_alignment_summary(general_title_summary, save_path_summary, Hext_range,
     fig.savefig(os.path.join(folder, "summary_alignments_vs_hext.png"), dpi=300, bbox_inches="tight",)
     plt.close(fig)
 
-
-def plot_transition_spatial_error_summary(general_title_summary, save_path_summary, hd_error_map, spin_error_map, winding_context_map, core_occupancy_map, transition_count,):
+def plot_transition_spatial_error_summary(general_title_summary,save_path_summary, hd_error_map, spin_error_map, winding_context_map=None, core_occupancy_map=None, transition_count=None,):
     """
-    Create a 2x2 transition-peak spatial error and vortex-context summary.
+    Generates a transition-focused spatial summary.
+
+    Panels:
+      1) mean spatial Hdemag MAE over detected transition steps
+      2) mean spatial magnetization MAE over detected transition steps
+      3) vortex-core occupancy map
+      4) magnetization MAE duplicated with vortex-core occupancy contour overlay
     """
     folder = os.path.join(save_path_summary, "summary_plots")
     os.makedirs(folder, exist_ok=True)
 
     hd_error_map = np.asarray(hd_error_map, dtype=float)
     spin_error_map = np.asarray(spin_error_map, dtype=float)
-    winding_context_map = np.asarray(winding_context_map, dtype=float)
-    core_occupancy_map = np.asarray(core_occupancy_map, dtype=float)
 
-    error_cmap = plt.get_cmap("hot").copy()
-    error_cmap.set_bad("lightgray")
-    winding_cmap = plt.get_cmap("viridis").copy()
-    winding_cmap.set_bad("lightgray")
-    occupancy_cmap = plt.get_cmap("magma").copy()
-    occupancy_cmap.set_bad("lightgray")
+    has_core_context = core_occupancy_map is not None
 
     fig, axs = plt.subplots(2, 2, figsize=(14, 12))
     fig.suptitle("Transition-Peak Spatial Error and Vortex Summary\n\n" + general_title_summary + 
-                 f"\nAveraged over {transition_count} detected transition event(s).", fontsize=13, fontweight="bold",)
+                 (f"\nAveraged over {transition_count} detected transition event(s)." 
+                  if transition_count is not None else ""), fontsize=13, fontweight="bold",)
 
-    im0 = axs[0, 0].imshow(hd_error_map.T, cmap=error_cmap, origin="lower", vmin=0.0,)
-    axs[0, 0].set_title("Mean Spatial Hdemag MAE", fontsize=11, fontweight="bold")
+    hd_vmax = float(np.nanmax(hd_error_map)) if np.isfinite(hd_error_map).any() else 1.0
+    spin_vmax = float(np.nanmax(spin_error_map)) if np.isfinite(spin_error_map).any() else 1.0
+    hd_vmax = hd_vmax if hd_vmax > 0 else 1.0
+    spin_vmax = spin_vmax if spin_vmax > 0 else 1.0
+
+    # ------------------------------------------------------------------
+    # Panel 1: Hdemag MAE
+    # ------------------------------------------------------------------
+    im0 = axs[0, 0].imshow(hd_error_map.T, cmap='hot', origin='lower', vmin=0.0, vmax=hd_vmax)
+    axs[0, 0].set_title("Mean Spatial Hdemag MAE", fontsize=11, fontweight='bold')
     axs[0, 0].set_xlabel("x [cell]")
     axs[0, 0].set_ylabel("y [cell]")
     fig.colorbar(im0, ax=axs[0, 0], label="Mean absolute component error [Oe]")
-    im1 = axs[0, 1].imshow(spin_error_map.T, cmap=error_cmap, origin="lower", vmin=0.0,)
-    axs[0, 1].set_title("Mean Spatial Magnetization MAE", fontsize=11, fontweight="bold")
+
+    # ------------------------------------------------------------------
+    # Panel 2: magnetization MAE
+    # ------------------------------------------------------------------
+    im1 = axs[0, 1].imshow(spin_error_map.T, cmap='hot', origin='lower', vmin=0.0, vmax=spin_vmax)
+    axs[0, 1].set_title("Mean Spatial Magnetization MAE", fontsize=11, fontweight='bold')
     axs[0, 1].set_xlabel("x [cell]")
     axs[0, 1].set_ylabel("y [cell]")
     fig.colorbar(im1, ax=axs[0, 1], label="Mean absolute component error in m")
 
-    im2 = axs[1, 0].imshow(winding_context_map.T, cmap=winding_cmap, origin="lower", vmin=0.0,)
-    axs[1, 0].set_title(r"FFT Mean $|w|$ at Transition Peaks", fontsize=11, fontweight="bold",)
-    axs[1, 0].set_xlabel("x [cell]")
-    axs[1, 0].set_ylabel("y [cell]")
-    fig.colorbar(im2, ax=axs[1, 0], label=r"Mean $|w|$")
+    # ------------------------------------------------------------------
+    # Panel 3: vortex-core occupancy
+    # ------------------------------------------------------------------
+    if has_core_context:
+        core_occupancy_map = np.asarray(core_occupancy_map, dtype=float)
+        im2 = axs[1, 0].imshow(core_occupancy_map.T, cmap='magma', origin='lower', vmin=0.0, vmax=1.0)
+        axs[1, 0].set_title("FFT Vortex-Core Occupancy at Transition Peaks", fontsize=11, fontweight='bold')
+        axs[1, 0].set_xlabel("x [cell]")
+        axs[1, 0].set_ylabel("y [cell]")
+        fig.colorbar(im2, ax=axs[1, 0], label="Fraction of transition events")
+    else:
+        axs[1, 0].axis("off")
+        axs[1, 0].text(0.5, 0.5, "No vortex-core map provided", ha="center", va="center", transform=axs[1, 0].transAxes)
 
-    im3 = axs[1, 1].imshow(core_occupancy_map.T, cmap=occupancy_cmap, origin="lower", vmin=0.0, vmax=1.0,)
-    axs[1, 1].set_title("FFT Vortex-Core Occupancy at Transition Peaks", fontsize=11, fontweight="bold",)
+    # ------------------------------------------------------------------
+    # Panel 4: magnetization MAE with vortex-core overlay
+    # ------------------------------------------------------------------
+    im3 = axs[1, 1].imshow(spin_error_map.T, cmap='hot', origin='lower', vmin=0.0, vmax=spin_vmax)
+    axs[1, 1].set_title("Magnetization MAE with FFT Vortex-Core Overlay", fontsize=11, fontweight='bold')
     axs[1, 1].set_xlabel("x [cell]")
     axs[1, 1].set_ylabel("y [cell]")
-    fig.colorbar(im3, ax=axs[1, 1], label="Fraction of transition events")
+    fig.colorbar(im3, ax=axs[1, 1], label="Mean absolute component error in m")
+
+    if has_core_context and np.nanmax(core_occupancy_map) > 0:
+        # Contour at any nonzero occupancy. For many events, you could raise this threshold.
+        axs[1, 1].contour(core_occupancy_map.T, levels=[1e-12], colors='cyan', linewidths=1.5, origin='lower')
 
     fig.tight_layout()
-    fig.savefig(os.path.join(folder, "transition_spatial_error_summary.png"), dpi=300, bbox_inches="tight",)
+    plt.savefig(os.path.join(folder, "transition_spatial_error_summary.png"), dpi=300, bbox_inches='tight')
     plt.close(fig)
 
 
