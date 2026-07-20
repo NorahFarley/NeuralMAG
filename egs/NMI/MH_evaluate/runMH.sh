@@ -50,7 +50,7 @@ GPU=0
 KRN=16
 LAYERS=2
 MODEL_NAME="model.pt"
-LOSS_TYPE="baseline_full"
+LOSS_TYPE="baseline3_analyze"
 
 MS_BASE=1000
 AX_BASE="0.5e-6"
