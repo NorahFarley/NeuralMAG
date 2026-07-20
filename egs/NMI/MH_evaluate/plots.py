@@ -272,6 +272,142 @@ def compute_training_texture_metrics(spin, exchange_energy=None, active_threshol
             "interior_layer0_cell_count": int(interior.sum().item()),}
 
 
+@torch.no_grad()
+def compute_exact_loop_change_metrics(
+    current_spin,
+    previous_spin=None,
+    *,
+    delta_hext_oe=None,
+    active_threshold=1.0e-12,
+):
+    """
+    Compute exact cellwise loop-to-loop changes of the maps used by the
+    gradient, exchange-proxy, and winding-density training losses.
+
+    For a spatial map q(r), this calculates:
+
+        mean_r |q_i(r) - q_(i-1)(r)|
+
+    over cells that are magnetic in both states.
+
+    The per-Oe result divides this value by:
+
+        |H_i - H_(i-1)|
+
+    The calculation uses layer 0 because the current training functions
+    gradient_magnitude(...) and winding_density(...) operate on the first
+    three input channels.
+    """
+    current_tensor = (
+        current_spin
+        if isinstance(current_spin, torch.Tensor)
+        else torch.as_tensor(current_spin)
+    )
+
+    current_layer0 = _layer0_training_tensor(current_tensor)
+
+    current_active = (
+        torch.linalg.vector_norm(current_layer0[:, :3], dim=1)
+        > active_threshold
+    )
+
+    current_gradient = _training_gradient_map(current_layer0)
+
+    # Exact quantity used by loss_type == "exchange_energy".
+    current_exchange_proxy = current_gradient.square()
+
+    # Signed local winding-density map.
+    current_winding = _training_winding_map(current_layer0)
+
+    result = {
+        "gradient_loop_abs_change_mean": float("nan"),
+        "gradient_loop_abs_change_per_oe": float("nan"),
+
+        "exchange_proxy_loop_abs_change_mean": float("nan"),
+        "exchange_proxy_loop_abs_change_per_oe": float("nan"),
+
+        "winding_map_loop_abs_change_mean": float("nan"),
+        "winding_map_loop_abs_change_per_oe": float("nan"),
+    }
+
+    # There is no previous M-H state for the first field value.
+    if previous_spin is None:
+        return result
+
+    previous_tensor = (
+        previous_spin
+        if isinstance(previous_spin, torch.Tensor)
+        else torch.as_tensor(previous_spin)
+    )
+
+    previous_tensor = previous_tensor.to(
+        device=current_layer0.device,
+        dtype=current_layer0.dtype,
+    )
+
+    previous_layer0 = _layer0_training_tensor(previous_tensor)
+
+    previous_active = (
+        torch.linalg.vector_norm(previous_layer0[:, :3], dim=1)
+        > active_threshold
+    )
+
+    # Only compare cells that are magnetic in both converged states.
+    compare_mask = current_active & previous_active
+
+    if not torch.any(compare_mask):
+        return result
+
+    previous_gradient = _training_gradient_map(previous_layer0)
+    previous_exchange_proxy = previous_gradient.square()
+    previous_winding = _training_winding_map(previous_layer0)
+
+    gradient_change = _selected_mean(
+        torch.abs(current_gradient - previous_gradient),
+        compare_mask,
+    )
+
+    exchange_proxy_change = _selected_mean(
+        torch.abs(
+            current_exchange_proxy
+            - previous_exchange_proxy
+        ),
+        compare_mask,
+    )
+
+    winding_change = _selected_mean(
+        torch.abs(current_winding - previous_winding),
+        compare_mask,
+    )
+
+    result["gradient_loop_abs_change_mean"] = gradient_change
+
+    result[
+        "exchange_proxy_loop_abs_change_mean"
+    ] = exchange_proxy_change
+
+    result[
+        "winding_map_loop_abs_change_mean"
+    ] = winding_change
+
+    if delta_hext_oe is not None:
+        delta_h = abs(float(delta_hext_oe))
+
+        if delta_h > 0.0:
+            result[
+                "gradient_loop_abs_change_per_oe"
+            ] = gradient_change / delta_h
+
+            result[
+                "exchange_proxy_loop_abs_change_per_oe"
+            ] = exchange_proxy_change / delta_h
+
+            result[
+                "winding_map_loop_abs_change_per_oe"
+            ] = winding_change / delta_h
+
+    return result
+
 def _set_reversed_hext_axis(ax, Hext_range):
     values = np.asarray(Hext_range, dtype=float)
     max_h = float(np.nanmax(values))
@@ -1084,3 +1220,5 @@ def compute_temporal_hd_variance(hd_history_buffer):
     variance_map = np.var(hd_mag_history, axis=0)
     mean_variance = float(np.mean(variance_map))
     return variance_map, mean_variance
+
+

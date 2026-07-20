@@ -13,7 +13,7 @@ import argparse
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, Sequence, Tuple
+from typing import Any, Dict, Sequence, Tuple, Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -34,6 +34,7 @@ import libs.MAG2305 as MAG2305
 from libs.Unet import UNet
 from plots import (
     compute_training_gradient_change_rate_metrics,
+    compute_exact_loop_change_metrics,
     compute_training_texture_metrics,
     plot_error_summary,
     plot_error_vs_transition_proximity,
@@ -125,6 +126,74 @@ def _mean_field_magnitude(field: torch.Tensor, spin: torch.Tensor) -> float:
     selected = magnitude[active]
     return float(selected.mean().item()) if selected.numel() else float(magnitude.mean().item())
 
+@torch.no_grad()
+def _exchange_energy_density_map(model) -> torch.Tensor:
+    """
+    Calculate MAG2305's per-cell exchange-energy density.
+
+    MAG2305's exchange energy is based on:
+
+        epsilon_ex(r)
+        =
+        -0.5 * Ms(r) * m(r) dot H_ex(r)
+
+    The returned tensor has shape:
+
+        (Nx, Ny, Nz)
+
+    and units of erg/cm^3.
+    """
+    return (
+        -0.5
+        * model.Msmx
+        * torch.sum(model.Spin * model.He, dim=-1)
+    )
+
+
+def _exchange_density_loop_change(
+    current_map: torch.Tensor,
+    previous_map: Optional[torch.Tensor],
+    current_active_mask: torch.Tensor,
+    previous_active_mask: Optional[torch.Tensor],
+    delta_hext_oe: Optional[float],
+) -> Dict[str, float]:
+    """
+    Calculate the exact loop-to-loop absolute change of physical
+    exchange-energy density.
+    """
+    result = {
+        "exchange_energy_density_loop_abs_change_mean": float("nan"),
+        "exchange_energy_density_loop_abs_change_per_oe": float("nan"),
+    }
+
+    if previous_map is None or previous_active_mask is None:
+        return result
+
+    compare_mask = current_active_mask & previous_active_mask
+
+    selected = torch.abs(
+        current_map - previous_map
+    )[compare_mask]
+
+    if selected.numel() == 0:
+        return result
+
+    change = float(selected.mean().item())
+
+    result[
+        "exchange_energy_density_loop_abs_change_mean"
+    ] = change
+
+    if (
+        delta_hext_oe is not None
+        and abs(float(delta_hext_oe)) > 0.0
+    ):
+        result[
+            "exchange_energy_density_loop_abs_change_per_oe"
+        ] = change / abs(float(delta_hext_oe))
+
+    return result
+
 def _mean_torque_magnitude(spin: torch.Tensor, field: torch.Tensor) -> float:
     """Mean |m x H| over magnetized cells."""
     active = torch.linalg.vector_norm(spin, dim=-1) > 1.0e-12
@@ -190,7 +259,7 @@ def plot_results(nloop, spin_mm, spin_un, itern1, itern2, Hd_mm, Hd_un, x_plot, 
     axs[0, 3].legend(fontsize=16, loc='upper left')
     axs[0, 3].set_title('M-H data',fontsize=16)
     axs[0, 3].set_xlabel('Hext [Oe]',fontsize=16)
-    axs[0, 3].set_ylabel('Mext/Ms',fontsize=16)
+    axs[0, 3].set_ylabel(r'Longitudinal Magnetization $M_{\parallel}/M_s$', fontsize=16)
     axs[0, 3].set_xlim(min(Hext_range)*1.1, max(Hext_range)*1.1)
     axs[0, 3].set_ylim(-1.1, 1.1)
     axs[0, 3].grid(True, axis='both', lw=0.5, ls='-.')
@@ -314,7 +383,7 @@ def main() -> None:
                       f"size{args.w}_Ms{args.Ms}_Ax{args.Ax}_Ku{args.Ku}_dtime{args.dtime}_"
                       f"split{args.spin_split}_seed{args.rand_seed}_Layers{args.layers}/")
     output_dir.mkdir(parents=True, exist_ok=True)
-    summary_dir = output_dir / "summary_plots"
+    summary_dir = output_dir / "final_plots"
     summary_dir.mkdir(parents=True, exist_ok=True)
     original_plot_dir = output_dir / "original_iteration_plots"
     original_plot_dir.mkdir(parents=True, exist_ok=True)
@@ -352,6 +421,36 @@ def main() -> None:
                     'interior_layer0_cell_count')
     texture_fft: Dict[str, list] = {key: [] for key in texture_keys}
     texture_unet: Dict[str, list] = {key: [] for key in texture_keys}
+
+    loop_change_keys = (
+        "gradient_loop_abs_change_mean",
+        "gradient_loop_abs_change_per_oe",
+
+        "exchange_proxy_loop_abs_change_mean",
+        "exchange_proxy_loop_abs_change_per_oe",
+
+        "exchange_energy_density_loop_abs_change_mean",
+        "exchange_energy_density_loop_abs_change_per_oe",
+
+        "winding_map_loop_abs_change_mean",
+        "winding_map_loop_abs_change_per_oe",
+    )
+
+    loop_change_fft: Dict[str, list] = {
+        key: [] for key in loop_change_keys
+    }
+
+    loop_change_unet: Dict[str, list] = {
+        key: [] for key in loop_change_keys
+    }
+
+    delta_hext_history: list[float] = []
+
+    previous_fft_exchange_density_map = None
+    previous_unet_exchange_density_map = None
+
+    previous_fft_active_mask = None
+    previous_unet_active_mask = None
 
     gradient_change_keys = ('gradient_spatial_rate_mean', 'exchange_proxy_spatial_rate_mean', 
                             'gradient_loop_to_loop_rate_mean', 'exchange_proxy_loop_to_loop_rate_mean',)
@@ -393,15 +492,164 @@ def main() -> None:
         final_fft_error = float(error_fft[-1]) if len(error_fft) else np.nan
         final_unet_error = float(error_unet[-1]) if len(error_unet) else np.nan
 
+        # Recalculate all fields at the actual final normalized spin state.
+        film_fft.GetHeff_intrinsic()
+        film_unet.GetHeff_unetHd()
+
+        fft_hext_tensor = torch.as_tensor(
+            hext_vector,
+            device=film_fft.Spin.device,
+            dtype=film_fft.Spin.dtype,
+        )
+
+        unet_hext_tensor = torch.as_tensor(
+            hext_vector,
+            device=film_unet.Spin.device,
+            dtype=film_unet.Spin.dtype,
+        )
+
+        # GetHeff_intrinsic/GetHeff_unetHd exclude Hext.
+        film_fft.Heff = film_fft.Heff + fft_hext_tensor
+        film_unet.Heff = film_unet.Heff + unet_hext_tensor
+
         film_fft.GetEnergy_detailed(Hext=hext_vector)
         film_unet.GetEnergy_detailed(Hext=hext_vector)
 
         fft_texture = compute_training_texture_metrics(film_fft.Spin, exchange_energy=film_fft.Energy_excha)
-        unet_texture = compute_training_texture_metrics(film_unet.Spin, exchange_energy=film_unet.Energy_excha)
-        
+        unet_texture = compute_training_texture_metrics(film_unet.Spin, exchange_energy=film_unet.Energy_excha)       
+
         for key in texture_keys:
             texture_fft[key].append(fft_texture[key])
             texture_unet[key].append(unet_texture[key])
+
+        delta_hext_oe = (
+            abs(
+                float(hext_scalar)
+                - float(hext_range[nloop - 1])
+            )
+            if nloop > 0
+            else float("nan")
+        )
+
+        delta_hext_history.append(delta_hext_oe)
+
+
+        previous_fft_tensor = None
+        previous_unet_tensor = None
+
+        if nloop > 0:
+            previous_fft_tensor = torch.as_tensor(
+                previous_fft,
+                device=film_fft.Spin.device,
+                dtype=film_fft.Spin.dtype,
+            )
+
+            previous_unet_tensor = torch.as_tensor(
+                previous_unet,
+                device=film_unet.Spin.device,
+                dtype=film_unet.Spin.dtype,
+            )
+
+
+        # -------------------------------------------------------------
+        # Exact training-map loop changes
+        # -------------------------------------------------------------
+        fft_loop_change = compute_exact_loop_change_metrics(
+            current_spin=film_fft.Spin,
+            previous_spin=previous_fft_tensor,
+            delta_hext_oe=(
+                delta_hext_oe if nloop > 0 else None
+            ),
+        )
+
+        unet_loop_change = compute_exact_loop_change_metrics(
+            current_spin=film_unet.Spin,
+            previous_spin=previous_unet_tensor,
+            delta_hext_oe=(
+                delta_hext_oe if nloop > 0 else None
+            ),
+        )
+
+
+        # -------------------------------------------------------------
+        # Exact physical exchange-energy-density loop changes
+        # -------------------------------------------------------------
+        current_fft_exchange_density_map = (
+            _exchange_energy_density_map(film_fft)
+        )
+
+        current_unet_exchange_density_map = (
+            _exchange_energy_density_map(film_unet)
+        )
+
+        current_fft_active_mask = (
+            torch.linalg.vector_norm(
+                film_fft.Spin,
+                dim=-1,
+            )
+            > 1.0e-12
+        )
+
+        current_unet_active_mask = (
+            torch.linalg.vector_norm(
+                film_unet.Spin,
+                dim=-1,
+            )
+            > 1.0e-12
+        )
+
+        fft_loop_change.update(
+            _exchange_density_loop_change(
+                current_map=current_fft_exchange_density_map,
+                previous_map=previous_fft_exchange_density_map,
+                current_active_mask=current_fft_active_mask,
+                previous_active_mask=previous_fft_active_mask,
+                delta_hext_oe=(
+                    delta_hext_oe if nloop > 0 else None
+                ),
+            )
+        )
+
+        unet_loop_change.update(
+            _exchange_density_loop_change(
+                current_map=current_unet_exchange_density_map,
+                previous_map=previous_unet_exchange_density_map,
+                current_active_mask=current_unet_active_mask,
+                previous_active_mask=previous_unet_active_mask,
+                delta_hext_oe=(
+                    delta_hext_oe if nloop > 0 else None
+                ),
+            )
+        )
+
+
+        # Save current maps as the previous maps for the next field step.
+        previous_fft_exchange_density_map = (
+            current_fft_exchange_density_map.detach().clone()
+        )
+
+        previous_unet_exchange_density_map = (
+            current_unet_exchange_density_map.detach().clone()
+        )
+
+        previous_fft_active_mask = (
+            current_fft_active_mask.detach().clone()
+        )
+
+        previous_unet_active_mask = (
+            current_unet_active_mask.detach().clone()
+        )
+
+
+        # Append one scalar value for each M-H field step.
+        for key in loop_change_keys:
+            loop_change_fft[key].append(
+                float(fft_loop_change[key])
+            )
+
+            loop_change_unet[key].append(
+                float(unet_loop_change[key])
+            )
 
         previous_fft_tensor = torch.as_tensor(previous_fft, device=film_fft.Spin.device, dtype=film_fft.Spin.dtype)
         previous_unet_tensor = torch.as_tensor(previous_unet, device=film_unet.Spin.device, dtype=film_unet.Spin.dtype)
@@ -503,9 +751,24 @@ def main() -> None:
 
         title = (general_title_summary+ f"Loop: {nloop} | Hext = {hext_scalar:.1f} Oe | Iterations: FFT [{iterations_fft}] | UNet [{iterations_unet}]")
 
-        plot_results(nloop=nloop, spin_mm=spin_mm, spin_un=spin_un, itern1=iterations_fft, itern2=iterations_unet, Hd_mm=hd_mm, 
-                     Hd_un=hd_un, x_plot=x_plot, y1_plot=y_fft, y2_plot=y_unet, Hext_range=hext_range, error1_rcd=error_fft, 
-                     error2_rcd=error_unet, save_path_iteration=str(original_plot_dir), general_title_iteration=title)
+        if not args.skip_original_plots:
+            plot_results(
+                nloop=nloop,
+                spin_mm=spin_mm,
+                spin_un=spin_un,
+                itern1=iterations_fft,
+                itern2=iterations_unet,
+                Hd_mm=hd_mm,
+                Hd_un=hd_un,
+                x_plot=x_plot,
+                y1_plot=y_fft,
+                y2_plot=y_unet,
+                Hext_range=hext_range,
+                error1_rcd=error_fft,
+                error2_rcd=error_unet,
+                save_path_iteration=str(original_plot_dir),
+                general_title_iteration=title,
+            )
 
         if np.isclose(hext_scalar, 0.0):
             np.save(output_dir / "Mr_spin_mm.npy", spin_mm)
@@ -517,15 +780,55 @@ def main() -> None:
             np.save(output_dir / f"Hc{nloop-1}_spin_un.npy", previous_unet)
             np.save(output_dir / f"Hc{nloop}_spin_un.npy", spin_un)
 
-    physics_df = recorder.save_csv(output_dir / "physics_snapshots.csv")
+    physics_df = recorder.dataframe()
+
+    # physics_df = recorder.save_csv(output_dir / "physics_snapshots.csv")
+    # print(f"Saved {len(physics_df)} converged physics snapshots to {output_dir / 'physics_snapshots.csv'}")
+
+    y_limits={"hd": (0.0, 400.0), "trajectory": (0.0, 0.75), "exchange": (0.0, 400.0), "anisotropy": (0.0, 400.0),}
+
+
+    # Add the original texture metrics.
+    for prefix, histories in (
+        ("fft", texture_fft),
+        ("unet", texture_unet),
+    ):
+        for key, values in histories.items():
+            physics_df[f"{prefix}_{key}"] = np.asarray(
+                values,
+                dtype=float,
+            )
+
+    # Add the exact cellwise loop-change metrics.
+    for prefix, histories in (
+        ("fft", loop_change_fft),
+        ("unet", loop_change_unet),
+    ):
+        for key, values in histories.items():
+            physics_df[f"{prefix}_{key}"] = np.asarray(
+                values,
+                dtype=float,
+            )
+
+    physics_df["delta_hext_oe"] = np.asarray(
+        delta_hext_history,
+        dtype=float,
+    )
+
+    physics_df.to_csv(
+        output_dir / "physics_snapshots.csv",
+        index=False,
+    )
+
     np.save(output_dir / "Hext_array.npy", np.asarray(x_plot))
     np.save(output_dir / "Mext_array_mm.npy", np.asarray(y_fft))
     np.save(output_dir / "Mext_array_un.npy", np.asarray(y_unet))
     np.save(output_dir / "instantaneous_hd_mae.npy", np.asarray(hd_error_mae))
     np.save(output_dir / "trajectory_shift_mae.npy", np.asarray(spin_error_mae))
-    print(f"Saved {len(physics_df)} converged physics snapshots to {output_dir / 'physics_snapshots.csv'}")
 
-    y_limits={"hd": (0.0, 400.0), "trajectory": (0.0, 0.75), "exchange": (0.0, 400.0), "anisotropy": (0.0, 400.0),}
+    print(
+    f"Saved {len(physics_df)} converged physics snapshots to "
+    f"{output_dir / 'physics_snapshots.csv'}")
 
     if not args.skip_summary_plots:
         plot_full_energy_summary(general_title_summary, str(summary_dir), full_fft, full_unet, hext_range)
