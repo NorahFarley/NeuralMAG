@@ -1,43 +1,48 @@
 # -*- coding: utf-8 -*-
+"""Requested M-H diagnostics for the NeuralMAG accuracy project.
+
+Only plots explicitly retained by the user are included:
+
+- error summary
+- torque summary
+- torque-error summary
+- energy summary
+- field summary
+- performance summary
+- magnetization-gradient summary
+- exchange-energy-density summary
+- winding-density summary
+- gradient-magnitude, full gradient-tensor, and exchange rate-of-change summary
+- exact rate/error overlay figures for gradient magnitude, gradient tensor,
+  exchange-energy density, and winding density
 """
-Created on Thurs July 09 10:30:00 2026
-"""
+
+from __future__ import annotations
+
 import os
-import numpy as np
+from typing import Dict, Mapping, Sequence
+
 import matplotlib.pyplot as plt
-from matplotlib.colors import Normalize
-import matplotlib.colors as colors
-import argparse
+import numpy as np
 import torch
-import seaborn as sns
-import time
-from scipy.stats import linregress, pearsonr
-import csv
-import pandas as pd
-from scipy.stats import pearsonr
 
-from libs.misc import Culist, MaskTp, spin_prepare, winding_density
-import libs.MAG2305 as MAG2305
-from libs.Unet import UNet
 
-# ============================================================================
-# M-H TEXTURE DIAGNOSTICS
-# ============================================================================
+# =============================================================================
+# Texture and loop-change calculations
+# =============================================================================
+
 
 def _layer0_training_tensor(spin):
-    """
-    Return layer 0 as ``(batch, 3, Nx, Ny)`` without changing values.
-
-    The gradient and winding losses were trained on the first three input
-    channels, which correspond to ``(m_x, m_y, m_z)`` of layer 0.
-    """
+    """Return layer 0 as ``(batch, 3, Nx, Ny)`` without changing values."""
     tensor = spin if isinstance(spin, torch.Tensor) else torch.as_tensor(spin)
 
     if tensor.ndim != 4:
-        raise ValueError("spin must have shape (Nx, Ny, Nz, 3) or (batch, channels, Nx, Ny); "
-                         f"received {tuple(tensor.shape)}.")
+        raise ValueError(
+            "spin must have shape (Nx, Ny, Nz, 3) or "
+            f"(batch, channels, Nx, Ny); received {tuple(tensor.shape)}."
+        )
 
-    # Already channel-first: (batch, channels, Nx, Ny).
+    # Already channel-first.
     if tensor.shape[1] >= 3 and tensor.shape[-1] != 3:
         return tensor[:, :3]
 
@@ -47,22 +52,14 @@ def _layer0_training_tensor(spin):
             raise ValueError("The spin tensor contains no magnetic layers.")
         return tensor[:, :, 0, :].permute(2, 0, 1).unsqueeze(0)
 
-    # Covers channel-first grids whose Ny happens to equal 3.
     if tensor.shape[1] >= 3:
         return tensor[:, :3]
 
-    raise ValueError("Could not identify the three magnetization channels in spin with "
-                     f"shape {tuple(tensor.shape)}.")
+    raise ValueError(f"Could not identify magnetization channels in {tuple(tensor.shape)}.")
 
 
 def _training_gradient_map(spin_channel_first):
-    """
-    Reproduce the exact finite-difference map used by ``train.py``.
-
-    This intentionally uses grid-cell units (dx = dy = 1), centered
-    differences, and replicated values only at the outer rectangular array
-    boundary. It does not mask sample-shape boundaries before differentiating.
-    """
+    """Reproduce the finite-difference ``|grad(m)|`` map used in training."""
     if spin_channel_first.ndim != 4 or spin_channel_first.shape[1] < 3:
         raise ValueError("Expected spin shape (batch, >=3, Nx, Ny).")
 
@@ -87,31 +84,8 @@ def _training_gradient_map(spin_channel_first):
     return torch.sqrt(grad_sq)
 
 
-def _strict_interior_mask(active_mask):
-    """
-    Select magnetic cells whose four in-plane neighbors are magnetic.
-
-    The rectangular array edge is always excluded. For masked samples, this
-    also removes the one-cell-thick geometric boundary around holes, triangles,
-    convex hulls, and other nonmagnetic regions.
-    """
-    if active_mask.ndim != 3:
-        raise ValueError("active_mask must have shape (batch, Nx, Ny).")
-
-    interior = torch.zeros_like(active_mask, dtype=torch.bool)
-    if active_mask.shape[1] < 3 or active_mask.shape[2] < 3:
-        return interior
-
-    interior[:, 1:-1, 1:-1] = (active_mask[:, 1:-1, 1:-1] & active_mask[:, :-2, 1:-1] & active_mask[:, 2:, 1:-1] 
-                               & active_mask[:, 1:-1, :-2] & active_mask[:, 1:-1, 2:])
-    
-    return interior
-
-
 def _training_winding_map(spin_channel_first):
-    """
-    Reproduce the local winding-density formula used during training.
-    """
+    """Reproduce the signed local winding-density map used in training."""
     if spin_channel_first.ndim != 4 or spin_channel_first.shape[1] < 2:
         raise ValueError("Expected spin shape (batch, >=2, Nx, Ny).")
 
@@ -128,13 +102,15 @@ def _training_winding_map(spin_channel_first):
     my_yp = torch.roll(my, shifts=-1, dims=2)
     my_ym = torch.roll(my, shifts=1, dims=2)
 
-    for plus, minus, original, axis in ((mx_xp, mx_xm, mx, "x"), (my_xp, my_xm, my, "x"),):
-        plus[:, -1, :] = original[:, -1, :]
-        minus[:, 0, :] = original[:, 0, :]
+    mx_xp[:, -1, :] = mx[:, -1, :]
+    mx_xm[:, 0, :] = mx[:, 0, :]
+    my_xp[:, -1, :] = my[:, -1, :]
+    my_xm[:, 0, :] = my[:, 0, :]
 
-    for plus, minus, original, axis in ((mx_yp, mx_ym, mx, "y"), (my_yp, my_ym, my, "y"),):
-        plus[:, :, -1] = original[:, :, -1]
-        minus[:, :, 0] = original[:, :, 0]
+    mx_yp[:, :, -1] = mx[:, :, -1]
+    mx_ym[:, :, 0] = mx[:, :, 0]
+    my_yp[:, :, -1] = my[:, :, -1]
+    my_ym[:, :, 0] = my[:, :, 0]
 
     dmx_dx = (mx_xp - mx_xm) / 2.0
     dmx_dy = (mx_yp - mx_ym) / 2.0
@@ -144,21 +120,36 @@ def _training_winding_map(spin_channel_first):
     return (dmx_dx * dmy_dy - dmy_dx * dmx_dy) / np.pi
 
 
+def _strict_interior_mask(active_mask):
+    if active_mask.ndim != 3:
+        raise ValueError("active_mask must have shape (batch, Nx, Ny).")
+
+    interior = torch.zeros_like(active_mask, dtype=torch.bool)
+    if active_mask.shape[1] < 3 or active_mask.shape[2] < 3:
+        return interior
+
+    interior[:, 1:-1, 1:-1] = (
+        active_mask[:, 1:-1, 1:-1]
+        & active_mask[:, :-2, 1:-1]
+        & active_mask[:, 2:, 1:-1]
+        & active_mask[:, 1:-1, :-2]
+        & active_mask[:, 1:-1, 2:]
+    )
+    return interior
+
+
 def _selected_mean(values, mask):
     selected = values[mask]
-
     return float(selected.mean().item()) if selected.numel() else float("nan")
 
 
 def _selected_max(values, mask):
     selected = values[mask]
-
     return float(selected.max().item()) if selected.numel() else float("nan")
 
-def _scalar_spatial_rate_map(values_batch):
-    """
-    Centered-difference spatial change map for a scalar field of shape (batch, Nx, Ny).
-    """
+
+def _scalar_spatial_variation_map(values_batch):
+    """Magnitude of the spatial gradient of a scalar map."""
     if values_batch.ndim != 3:
         raise ValueError("values_batch must have shape (batch, Nx, Ny).")
 
@@ -174,66 +165,34 @@ def _scalar_spatial_rate_map(values_batch):
 
     dv_dx = (xp - xm) / 2.0
     dv_dy = (yp - ym) / 2.0
-
     return torch.sqrt(dv_dx.square() + dv_dy.square())
 
 
 @torch.no_grad()
-def compute_training_gradient_change_rate_metrics(spin, previous_spin=None, active_threshold=1.0e-12):
-    """
-    Compute spatial and loop-to-loop change metrics for |∇m| and |∇m|^2.
-    """
-    tensor = spin if isinstance(spin, torch.Tensor) else torch.as_tensor(spin)
-    layer0 = _layer0_training_tensor(tensor)
+def compute_gradient_spatial_variation_metrics(spin, active_threshold=1.0e-12):
+    """Spatial variation of ``|grad(m)|`` and ``|grad(m)|^2`` in one state."""
+    layer0 = _layer0_training_tensor(spin)
     active = torch.linalg.vector_norm(layer0[:, :3], dim=1) > active_threshold
-
     gradient = _training_gradient_map(layer0)
     exchange_proxy = gradient.square()
 
-    gradient_spatial_rate = _scalar_spatial_rate_map(gradient)
-    exchange_spatial_rate = _scalar_spatial_rate_map(exchange_proxy)
+    return {
+        "gradient_spatial_variation_mean": _selected_mean(
+            _scalar_spatial_variation_map(gradient), active
+        ),
+        "exchange_proxy_spatial_variation_mean": _selected_mean(
+            _scalar_spatial_variation_map(exchange_proxy), active
+        ),
+    }
 
-    metrics = {"gradient_spatial_rate_mean": _selected_mean(gradient_spatial_rate, active),
-               "exchange_proxy_spatial_rate_mean": _selected_mean(exchange_spatial_rate, active),
-               "gradient_loop_to_loop_rate_mean": float("nan"),
-               "exchange_proxy_loop_to_loop_rate_mean": float("nan"),}
-
-    if previous_spin is not None:
-        prev_tensor = previous_spin if isinstance(previous_spin, torch.Tensor) else torch.as_tensor(previous_spin)
-        prev_layer0 = _layer0_training_tensor(prev_tensor)
-        prev_active = torch.linalg.vector_norm(prev_layer0[:, :3], dim=1) > active_threshold
-        compare_mask = active & prev_active
-        if not compare_mask.any():
-            compare_mask = active
-
-        prev_gradient = _training_gradient_map(prev_layer0)
-        prev_exchange_proxy = prev_gradient.square()
-
-        metrics["gradient_loop_to_loop_rate_mean"] = _selected_mean((gradient - prev_gradient).abs(), compare_mask)
-        metrics["exchange_proxy_loop_to_loop_rate_mean"] = _selected_mean((exchange_proxy - prev_exchange_proxy).abs(), compare_mask)
-
-    return metrics
 
 @torch.no_grad()
-def compute_training_texture_metrics(spin, exchange_energy=None, active_threshold=1.0e-12):
-    """Compute the scalar histories used by the new M-H summary plots.
-
-    Parameters
-    ----------
-    spin:
-        MAG2305 spin tensor ``(Nx, Ny, Nz, 3)`` or a channel-first training
-        tensor ``(batch, channels, Nx, Ny)``.
-    exchange_energy:
-        Optional MAG2305 ``Energy_excha`` value. Because MAG2305 sums a
-        per-cell cgs exchange-energy density, dividing by the number of active
-        cells gives the mean exchange-energy density in erg/cm^3.
-
-    Returns
-    -------
-    dict
-        Exact training-map summaries, boundary-controlled gradient summaries,
-        winding-density summaries, and exchange-energy summaries.
-    """
+def compute_training_texture_metrics(
+    spin,
+    exchange_energy=None,
+    active_threshold=1.0e-12,
+):
+    """Compute scalar texture histories used by the retained M-H plots."""
     tensor = spin if isinstance(spin, torch.Tensor) else torch.as_tensor(spin)
     layer0 = _layer0_training_tensor(tensor)
     active = torch.linalg.vector_norm(layer0[:, :3], dim=1) > active_threshold
@@ -243,33 +202,32 @@ def compute_training_texture_metrics(spin, exchange_energy=None, active_threshol
     winding_abs = _training_winding_map(layer0).abs()
 
     if tensor.ndim == 4 and tensor.shape[-1] == 3:
-        full_active_count = int((torch.linalg.vector_norm(tensor, dim=-1) > active_threshold).sum().item())
+        full_active_count = int(
+            (torch.linalg.vector_norm(tensor, dim=-1) > active_threshold).sum().item()
+        )
     else:
         full_active_count = int(active.sum().item())
 
     exchange_density = float("nan")
     if exchange_energy is not None and full_active_count > 0:
-        if isinstance(exchange_energy, torch.Tensor):
-            exchange_value = float(exchange_energy.detach().cpu().item())
-        else:
-            exchange_value = float(exchange_energy)
+        exchange_value = (
+            float(exchange_energy.detach().cpu().item())
+            if isinstance(exchange_energy, torch.Tensor)
+            else float(exchange_energy)
+        )
         exchange_density = exchange_value / full_active_count
 
-    return {# Exact map used by the original gradient-weighted training loss.
-            "gradient_training_grid_mean": float(gradient.mean().item()),
-            # Same map, but average only over magnetic center cells.
-            "gradient_active_mean": _selected_mean(gradient, active),
-            # Same map and stencil, restricted to cells with four magnetic neighbors.
-            "gradient_interior_mean": _selected_mean(gradient, interior),
-            # Exact proxy used by loss_type == "exchange_energy" in train.py.
-            "exchange_proxy_training_mean": float(gradient.square().mean().item()),
-            # Local winding density used by loss_type == "winding" in train.py.
-            "winding_training_abs_mean": _selected_mean(winding_abs, active),
-            "winding_training_abs_max": _selected_max(winding_abs, active),
-            # MAG2305 physical exchange-energy density averaged over all active layers.
-            "exchange_energy_density": exchange_density,
-            "active_cell_count": full_active_count,
-            "interior_layer0_cell_count": int(interior.sum().item()),}
+    return {
+        "gradient_training_grid_mean": float(gradient.mean().item()),
+        "gradient_active_mean": _selected_mean(gradient, active),
+        "gradient_interior_mean": _selected_mean(gradient, interior),
+        "exchange_proxy_training_mean": float(gradient.square().mean().item()),
+        "winding_training_abs_mean": _selected_mean(winding_abs, active),
+        "winding_training_abs_max": _selected_max(winding_abs, active),
+        "exchange_energy_density": exchange_density,
+        "active_cell_count": full_active_count,
+        "interior_layer0_cell_count": int(interior.sum().item()),
+    }
 
 
 @torch.no_grad()
@@ -280,945 +238,805 @@ def compute_exact_loop_change_metrics(
     delta_hext_oe=None,
     active_threshold=1.0e-12,
 ):
+    """Compute exact cellwise map changes before spatial averaging.
+
+    For a map ``q(r)`` this evaluates ``mean(|q_i(r)-q_(i-1)(r)|)``.
+    It does not use a difference of spatial means.
     """
-    Compute exact cellwise loop-to-loop changes of the maps used by the
-    gradient, exchange-proxy, and winding-density training losses.
-
-    For a spatial map q(r), this calculates:
-
-        mean_r |q_i(r) - q_(i-1)(r)|
-
-    over cells that are magnetic in both states.
-
-    The per-Oe result divides this value by:
-
-        |H_i - H_(i-1)|
-
-    The calculation uses layer 0 because the current training functions
-    gradient_magnitude(...) and winding_density(...) operate on the first
-    three input channels.
-    """
-    current_tensor = (
-        current_spin
-        if isinstance(current_spin, torch.Tensor)
-        else torch.as_tensor(current_spin)
-    )
-
-    current_layer0 = _layer0_training_tensor(current_tensor)
-
-    current_active = (
-        torch.linalg.vector_norm(current_layer0[:, :3], dim=1)
-        > active_threshold
-    )
-
-    current_gradient = _training_gradient_map(current_layer0)
-
-    # Exact quantity used by loss_type == "exchange_energy".
+    current = _layer0_training_tensor(current_spin)
+    current_active = torch.linalg.vector_norm(current[:, :3], dim=1) > active_threshold
+    current_gradient = _training_gradient_map(current)
     current_exchange_proxy = current_gradient.square()
-
-    # Signed local winding-density map.
-    current_winding = _training_winding_map(current_layer0)
+    current_winding = _training_winding_map(current)
 
     result = {
+        # Change in the scalar gradient-magnitude map:
+        #     ||grad(m_i)| - |grad(m_(i-1))||
         "gradient_loop_abs_change_mean": float("nan"),
         "gradient_loop_abs_change_per_oe": float("nan"),
 
+        # Full in-plane magnetization-gradient-tensor change:
+        #     ||grad(m_i - m_(i-1))||_F
+        # The Frobenius norm includes dm_x/dx, dm_x/dy, dm_y/dx,
+        # dm_y/dy, dm_z/dx, and dm_z/dy on layer 0.
+        "gradient_tensor_loop_abs_change_mean": float("nan"),
+        "gradient_tensor_loop_abs_change_per_oe": float("nan"),
+
         "exchange_proxy_loop_abs_change_mean": float("nan"),
         "exchange_proxy_loop_abs_change_per_oe": float("nan"),
-
         "winding_map_loop_abs_change_mean": float("nan"),
         "winding_map_loop_abs_change_per_oe": float("nan"),
     }
 
-    # There is no previous M-H state for the first field value.
     if previous_spin is None:
         return result
 
-    previous_tensor = (
-        previous_spin
-        if isinstance(previous_spin, torch.Tensor)
-        else torch.as_tensor(previous_spin)
+    previous = _layer0_training_tensor(previous_spin).to(
+        device=current.device,
+        dtype=current.dtype,
     )
-
-    previous_tensor = previous_tensor.to(
-        device=current_layer0.device,
-        dtype=current_layer0.dtype,
-    )
-
-    previous_layer0 = _layer0_training_tensor(previous_tensor)
-
-    previous_active = (
-        torch.linalg.vector_norm(previous_layer0[:, :3], dim=1)
-        > active_threshold
-    )
-
-    # Only compare cells that are magnetic in both converged states.
+    previous_active = torch.linalg.vector_norm(previous[:, :3], dim=1) > active_threshold
     compare_mask = current_active & previous_active
-
     if not torch.any(compare_mask):
         return result
 
-    previous_gradient = _training_gradient_map(previous_layer0)
+    previous_gradient = _training_gradient_map(previous)
     previous_exchange_proxy = previous_gradient.square()
-    previous_winding = _training_winding_map(previous_layer0)
+    previous_winding = _training_winding_map(previous)
 
     gradient_change = _selected_mean(
-        torch.abs(current_gradient - previous_gradient),
+        torch.abs(current_gradient - previous_gradient), compare_mask
+    )
+
+    # Because the finite-difference operator is linear,
+    # _training_gradient_map(current - previous) equals the Frobenius norm
+    # of grad(m_i) - grad(m_(i-1)) at each cell. Unlike the scalar quantity
+    # above, this also detects changes in gradient direction/component makeup
+    # when |grad(m)| itself stays nearly unchanged.
+    gradient_tensor_change_map = _training_gradient_map(current - previous)
+    gradient_tensor_change = _selected_mean(
+        gradient_tensor_change_map,
         compare_mask,
     )
 
     exchange_proxy_change = _selected_mean(
-        torch.abs(
-            current_exchange_proxy
-            - previous_exchange_proxy
-        ),
-        compare_mask,
+        torch.abs(current_exchange_proxy - previous_exchange_proxy), compare_mask
     )
-
     winding_change = _selected_mean(
-        torch.abs(current_winding - previous_winding),
-        compare_mask,
+        torch.abs(current_winding - previous_winding), compare_mask
     )
 
     result["gradient_loop_abs_change_mean"] = gradient_change
-
-    result[
-        "exchange_proxy_loop_abs_change_mean"
-    ] = exchange_proxy_change
-
-    result[
-        "winding_map_loop_abs_change_mean"
-    ] = winding_change
+    result["gradient_tensor_loop_abs_change_mean"] = gradient_tensor_change
+    result["exchange_proxy_loop_abs_change_mean"] = exchange_proxy_change
+    result["winding_map_loop_abs_change_mean"] = winding_change
 
     if delta_hext_oe is not None:
         delta_h = abs(float(delta_hext_oe))
-
         if delta_h > 0.0:
-            result[
-                "gradient_loop_abs_change_per_oe"
-            ] = gradient_change / delta_h
-
-            result[
-                "exchange_proxy_loop_abs_change_per_oe"
-            ] = exchange_proxy_change / delta_h
-
-            result[
-                "winding_map_loop_abs_change_per_oe"
-            ] = winding_change / delta_h
+            result["gradient_loop_abs_change_per_oe"] = gradient_change / delta_h
+            result["gradient_tensor_loop_abs_change_per_oe"] = (
+                gradient_tensor_change / delta_h
+            )
+            result["exchange_proxy_loop_abs_change_per_oe"] = (
+                exchange_proxy_change / delta_h
+            )
+            result["winding_map_loop_abs_change_per_oe"] = winding_change / delta_h
 
     return result
 
-def _set_reversed_hext_axis(ax, Hext_range):
-    values = np.asarray(Hext_range, dtype=float)
-    max_h = float(np.nanmax(values))
-    min_h = float(np.nanmin(values))
-    pad = 0.05 * (max_h - min_h if max_h != min_h else 1.0)
-    ax.set_xlim(max_h + pad, min_h - pad)
+
+# =============================================================================
+# Plot helpers
+# =============================================================================
 
 
-def plot_magnetization_gradient_vs_hext(general_title_summary, save_path_summary, Hext_range, gradient_fft, gradient_unet,):
-    """
-    Plot three boundary treatments of the training gradient map vs Hext.
-    """
-    folder = os.path.join(save_path_summary, "summary_plots")
+def _output_folder(save_path_summary):
+    folder = os.fspath(save_path_summary)
     os.makedirs(folder, exist_ok=True)
+    return folder
 
-    fig, axs = plt.subplots(1, 3, figsize=(19, 6.2), sharex=True)
-    fig.suptitle("Magnetization-Gradient Definitions Across the M-H Sweep\n\n" + general_title_summary, fontsize=13, fontweight="bold",)
 
-    panels = (("gradient_training_grid_mean", "Exact Training Map: Full-Grid Mean", r"Mean $|\nabla m|$ [cell$^{-1}$]", "Includes zero cells and sample-boundary gradients.",),
-              ("gradient_active_mean","Exact Training Map: Magnetic Centers", r"Mean $|\nabla m|$ [cell$^{-1}$]", "Removes empty centers but retains magnetic boundary cells.",),
-              ("gradient_interior_mean", "Strict Magnetic Interior", r"Mean $|\nabla m|$ [cell$^{-1}$]", "Uses only cells with magnetic ±x and ±y neighbors.",),)
+def _set_reversed_hext_axis(ax, hext_range):
+    values = np.asarray(hext_range, dtype=float)
+    maximum = float(np.nanmax(values))
+    minimum = float(np.nanmin(values))
+    pad = 0.05 * (maximum - minimum if maximum != minimum else 1.0)
+    ax.set_xlim(maximum + pad, minimum - pad)
 
-    for ax, (key, title, ylabel, subtitle) in zip(axs, panels):
-        ax.plot(Hext_range, gradient_fft[key], lw=2.3, label="FFT/LLG")
-        ax.plot(Hext_range, gradient_unet[key], lw=2.3, label="UNet/LLG")
+
+def _combined_legend(ax, twin):
+    lines1, labels1 = ax.get_legend_handles_labels()
+    lines2, labels2 = twin.get_legend_handles_labels()
+    ax.legend(lines1 + lines2, labels1 + labels2, fontsize=8, loc="upper right")
+
+
+# =============================================================================
+# Retained plots
+# =============================================================================
+
+
+def plot_magnetization_gradient_vs_hext(
+    general_title_summary,
+    save_path_summary,
+    hext_range,
+    gradient_fft,
+    gradient_unet,
+):
+    folder = _output_folder(save_path_summary)
+    fig, axes = plt.subplots(1, 3, figsize=(19, 6.2), sharex=True)
+    fig.suptitle(
+        "Magnetization-Gradient Definitions Across the M-H Sweep\n\n"
+        + general_title_summary,
+        fontsize=13,
+        fontweight="bold",
+    )
+
+    panels = (
+        (
+            "gradient_training_grid_mean",
+            "Exact Training Map: Full-Grid Mean",
+            r"Mean $|\nabla m|$ [cell$^{-1}$]",
+            "Includes zero cells and sample-boundary gradients.",
+        ),
+        (
+            "gradient_active_mean",
+            "Exact Training Map: Magnetic Centers",
+            r"Mean $|\nabla m|$ [cell$^{-1}$]",
+            "Excludes nonmagnetic center cells.",
+        ),
+        (
+            "gradient_interior_mean",
+            "Strict Magnetic Interior",
+            r"Mean $|\nabla m|$ [cell$^{-1}$]",
+            "Uses cells with four magnetic in-plane neighbors.",
+        ),
+    )
+
+    for ax, (key, title, ylabel, subtitle) in zip(axes, panels):
+        ax.plot(hext_range, gradient_fft[key], lw=2.3, label="FFT/LLG")
+        ax.plot(hext_range, gradient_unet[key], lw=2.3, label="UNet/LLG")
         ax.set_title(title + "\n" + subtitle, fontsize=10.5, fontweight="bold")
         ax.set_xlabel(r"External Field $H_{ext}$ [Oe]")
         ax.set_ylabel(ylabel)
-        _set_reversed_hext_axis(ax, Hext_range)
+        _set_reversed_hext_axis(ax, hext_range)
         ax.grid(True, linestyle="--", alpha=0.4)
         ax.legend(fontsize=9)
 
     fig.tight_layout()
-    fig.savefig(os.path.join(folder, "magnetization_gradient_definitions_vs_hext.png"), dpi=300, bbox_inches="tight",)
+    fig.savefig(
+        os.path.join(folder, "magnetization_gradient_definitions_vs_hext.png"),
+        dpi=300,
+        bbox_inches="tight",
+    )
     plt.close(fig)
 
 
-def plot_training_winding_density_vs_hext(general_title_summary, save_path_summary, Hext_range, winding_fft, winding_unet,):
-    """
-    Plot scalar summaries of the exact local winding map used in training.
-    """
-    folder = os.path.join(save_path_summary, "summary_plots")
-    os.makedirs(folder, exist_ok=True)
+def plot_training_winding_density_vs_hext(
+    general_title_summary,
+    save_path_summary,
+    hext_range,
+    winding_fft,
+    winding_unet,
+):
+    folder = _output_folder(save_path_summary)
+    fig, axes = plt.subplots(1, 2, figsize=(14.5, 6.2), sharex=True)
+    fig.suptitle(
+        "Training Winding-Density Signal Across the M-H Sweep\n\n"
+        + general_title_summary,
+        fontsize=13,
+        fontweight="bold",
+    )
 
-    fig, axs = plt.subplots(1, 2, figsize=(14.5, 6.2), sharex=True)
-    fig.suptitle("Training Winding-Density Signal Across the M-H Sweep\n\n" + general_title_summary, fontsize=13, fontweight="bold",)
+    panels = (
+        (
+            "winding_training_abs_mean",
+            r"Mean Local Winding Signal $\langle |w| \rangle$",
+            r"Mean $|w|$ on magnetic cells",
+        ),
+        (
+            "winding_training_abs_max",
+            r"Peak Local Winding Signal $\max |w|$",
+            r"Maximum $|w|$ on magnetic cells",
+        ),
+    )
 
-    panels = (("winding_training_abs_mean", r"Mean Local Training Weight Signal $\langle |w| \rangle$", r"Mean $|w|$ on magnetic cells",),
-              ("winding_training_abs_max", r"Peak Local Training Weight Signal $\max |w|$", r"Maximum $|w|$ on magnetic cells",),)
-
-    for ax, (key, title, ylabel) in zip(axs, panels):
-        ax.plot(Hext_range, winding_fft[key], lw=2.3, label="FFT/LLG")
-        ax.plot(Hext_range, winding_unet[key], lw=2.3, label="UNet/LLG")
+    for ax, (key, title, ylabel) in zip(axes, panels):
+        ax.plot(hext_range, winding_fft[key], lw=2.3, label="FFT/LLG")
+        ax.plot(hext_range, winding_unet[key], lw=2.3, label="UNet/LLG")
         ax.set_title(title, fontsize=11, fontweight="bold")
         ax.set_xlabel(r"External Field $H_{ext}$ [Oe]")
         ax.set_ylabel(ylabel)
-        _set_reversed_hext_axis(ax, Hext_range)
+        _set_reversed_hext_axis(ax, hext_range)
         ax.grid(True, linestyle="--", alpha=0.4)
         ax.legend(fontsize=9)
 
     fig.tight_layout()
-    fig.savefig(os.path.join(folder, "training_winding_density_vs_hext.png"), dpi=300, bbox_inches="tight",)
+    fig.savefig(
+        os.path.join(folder, "training_winding_density_vs_hext.png"),
+        dpi=300,
+        bbox_inches="tight",
+    )
     plt.close(fig)
 
 
-def plot_exchange_energy_density_vs_hext(general_title_summary, save_path_summary, Hext_range, exchange_fft, exchange_unet,):
-    """
-    Compare the training exchange proxy with MAG2305 exchange density.
-    """
-    folder = os.path.join(save_path_summary, "summary_plots")
-    os.makedirs(folder, exist_ok=True)
+def plot_exchange_energy_density_vs_hext(
+    general_title_summary,
+    save_path_summary,
+    hext_range,
+    exchange_fft,
+    exchange_unet,
+):
+    folder = _output_folder(save_path_summary)
+    fig, axes = plt.subplots(1, 2, figsize=(14.5, 6.2), sharex=True)
+    fig.suptitle(
+        "Exchange-Energy Signals Across the M-H Sweep\n\n" + general_title_summary,
+        fontsize=13,
+        fontweight="bold",
+    )
 
-    fig, axs = plt.subplots(1, 2, figsize=(14.5, 6.2), sharex=True)
-    fig.suptitle("Exchange-Energy Density Across the M-H Sweep\n\n" + general_title_summary, fontsize=13, fontweight="bold",)
+    panels = (
+        (
+            "exchange_proxy_training_mean",
+            r"Training Proxy: $\langle |\nabla m|^2 \rangle$",
+            r"Mean $|\nabla m|^2$ [cell$^{-2}$]",
+        ),
+        (
+            "exchange_energy_density",
+            "MAG2305 Mean Exchange-Energy Density",
+            r"Exchange-energy density [erg/cm$^3$]",
+        ),
+    )
 
-    panels = (("exchange_proxy_training_mean", r"Training Proxy: $\langle |\nabla m|^2 \rangle$", r"Mean $|\nabla m|^2$ [cell$^{-2}$]",),
-              ("exchange_energy_density", "MAG2305 Mean Exchange-Energy Density", r"Exchange-energy density [erg/cm$^3$]",),)
-
-    for ax, (key, title, ylabel) in zip(axs, panels):
-        ax.plot(Hext_range, exchange_fft[key], lw=2.3, label="FFT/LLG")
-        ax.plot(Hext_range, exchange_unet[key], lw=2.3, label="UNet/LLG")
+    for ax, (key, title, ylabel) in zip(axes, panels):
+        ax.plot(hext_range, exchange_fft[key], lw=2.3, label="FFT/LLG")
+        ax.plot(hext_range, exchange_unet[key], lw=2.3, label="UNet/LLG")
         ax.set_title(title, fontsize=11, fontweight="bold")
         ax.set_xlabel(r"External Field $H_{ext}$ [Oe]")
         ax.set_ylabel(ylabel)
-        _set_reversed_hext_axis(ax, Hext_range)
+        _set_reversed_hext_axis(ax, hext_range)
         ax.grid(True, linestyle="--", alpha=0.4)
         ax.legend(fontsize=9)
 
     fig.tight_layout()
-    fig.savefig(os.path.join(folder, "exchange_energy_density_vs_hext.png"), dpi=300, bbox_inches="tight",)
+    fig.savefig(
+        os.path.join(folder, "exchange_energy_density_vs_hext.png"),
+        dpi=300,
+        bbox_inches="tight",
+    )
     plt.close(fig)
 
-# =======================================================================
-# SUMMARY PLOTS (FINAL ENERGY PROFILES, PERFORMANCE METRICS, ETC.) 
-# =======================================================================
-def plot_gradient_change_rate_summary(general_title_summary, save_path_summary, Hext_range, change_fft, change_unet):
+
+def plot_gradient_change_rate_summary(
+    general_title_summary,
+    save_path_summary,
+    hext_range,
+    spatial_fft,
+    spatial_unet,
+    loop_fft,
+    loop_unet,
+):
+    """Six-panel summary containing both gradient-rate definitions.
+
+    The scalar gradient-magnitude rate is
+
+        mean(||grad(m_i)| - |grad(m_(i-1))||) / |delta Hext|.
+
+    The full gradient-tensor rate is
+
+        mean(||grad(m_i - m_(i-1))||_F) / |delta Hext|.
+
+    Both use exact cellwise changes before spatial averaging.
     """
-    Four-panel summary of spatial and loop-to-loop changes for |∇m| and |∇m|^2.
-    """
-    folder = os.path.join(save_path_summary, "summary_plots")
-    os.makedirs(folder, exist_ok=True)
+    folder = _output_folder(save_path_summary)
+    fig, axes = plt.subplots(2, 3, figsize=(21, 11), sharex=True)
+    fig.suptitle(
+        "Magnetization-Gradient and Exchange Change Across the M-H Sweep\n\n"
+        + general_title_summary,
+        fontsize=13,
+        fontweight="bold",
+    )
 
-    fig, axs = plt.subplots(2, 2, figsize=(15.5, 11), sharex=True)
-    fig.suptitle("Rate of Change of Magnetization-Gradient Signals Across the M-H Sweep\n\n" + general_title_summary, fontsize=13, fontweight="bold")
+    panels = (
+        (
+            spatial_fft,
+            spatial_unet,
+            "gradient_spatial_variation_mean",
+            "Spatial Variation of Gradient Magnitude",
+            r"Mean $|\nabla(|\nabla m|)|$ [cell$^{-2}$]",
+        ),
+        (
+            spatial_fft,
+            spatial_unet,
+            "exchange_proxy_spatial_variation_mean",
+            "Spatial Variation of Exchange Proxy",
+            r"Mean $|\nabla(|\nabla m|^2)|$ [cell$^{-3}$]",
+        ),
+        (
+            loop_fft,
+            loop_unet,
+            "gradient_loop_abs_change_per_oe",
+            "Gradient-Magnitude Rate",
+            r"Mean $|\Delta|\nabla m||/|\Delta H_{ext}|$ "
+            r"[cell$^{-1}$/Oe]",
+        ),
+        (
+            loop_fft,
+            loop_unet,
+            "gradient_tensor_loop_abs_change_per_oe",
+            "Full Gradient-Tensor Rate",
+            r"Mean $||\nabla(m_i-m_{i-1})||_F/|\Delta H_{ext}|$ "
+            r"[cell$^{-1}$/Oe]",
+        ),
+        (
+            loop_fft,
+            loop_unet,
+            "exchange_proxy_loop_abs_change_per_oe",
+            "Exchange-Proxy Rate",
+            r"Mean $|\Delta(|\nabla m|^2)|/|\Delta H_{ext}|$ "
+            r"[cell$^{-2}$/Oe]",
+        ),
+        (
+            loop_fft,
+            loop_unet,
+            "exchange_energy_density_loop_abs_change_per_oe",
+            "Physical Exchange-Energy-Density Rate",
+            r"Mean $|\Delta\epsilon_{ex}|/|\Delta H_{ext}|$ "
+            r"[erg cm$^{-3}$/Oe]",
+        ),
+    )
 
-    panels = (("gradient_spatial_rate_mean", "Spatial Change of Magnetization Gradient Within One Loop", r"Mean spatial change of $|\nabla m|$",),
-              ("exchange_proxy_spatial_rate_mean", "Spatial Change of Gradient Squared Within One Loop", r"Mean spatial change of $|\nabla m|^2$",),
-              ("gradient_loop_to_loop_rate_mean", "Loop-to-Loop Change of Magnetization Gradient", r"Mean $|\Delta |\nabla m||$ from previous loop",),
-              ("exchange_proxy_loop_to_loop_rate_mean", "Loop-to-Loop Change of Gradient Squared", r"Mean $|\Delta (|\nabla m|^2)|$ from previous loop",),)
-
-    for ax, (key, title, ylabel) in zip(axs.flat, panels):
-        ax.plot(Hext_range, change_fft[key], lw=2.3, label="FFT/LLG")
-        ax.plot(Hext_range, change_unet[key], lw=2.3, label="UNet/LLG")
+    for ax, (fft_data, unet_data, key, title, ylabel) in zip(axes.flat, panels):
+        ax.plot(hext_range, fft_data[key], lw=2.3, label="FFT/LLG")
+        ax.plot(hext_range, unet_data[key], lw=2.3, label="UNet/LLG")
         ax.set_title(title, fontsize=11, fontweight="bold")
         ax.set_xlabel(r"External Field $H_{ext}$ [Oe]")
         ax.set_ylabel(ylabel)
-        _set_reversed_hext_axis(ax, Hext_range)
+        _set_reversed_hext_axis(ax, hext_range)
         ax.grid(True, linestyle="--", alpha=0.4)
         ax.legend(fontsize=9)
 
     fig.tight_layout()
-    fig.savefig(os.path.join(folder, "gradient_change_rate_summary_vs_hext.png"), dpi=300, bbox_inches="tight",)
+    fig.savefig(
+        os.path.join(folder, "gradient_change_rate_summary_vs_hext.png"),
+        dpi=300,
+        bbox_inches="tight",
+    )
     plt.close(fig)
 
-def plot_full_energy_summary(general_title_summary, save_path_summary,full_data_fft, full_data_un, Hext_range):
-    """
-    Generates a final 2x2 multi-panel graph charting equilibrium energy components 
-    across the entire completed external field sweep loop range.
-    """
-    full_energy_folder = os.path.join(save_path_summary, "summary_plots")
-    os.makedirs(full_energy_folder, exist_ok=True)
-    
-    fig, axs = plt.subplots(2, 2, figsize=(15, 11))
-  
-    fig.suptitle("Full MH Curve Energy Summary\n\n"+ general_title_summary, fontsize=13, fontweight="bold")
-    
-    # Calculate uniform X-axis padding based on external field bounds
-    max_h, min_h = max(Hext_range), min(Hext_range)
-    h_range = max_h - min_h
-    xmax_padded = max_h + (h_range * 0.05)
-    xmin_padded = min_h - (h_range * 0.05)
-    
-    plot_map = [('demag', 'Equilibrium Demagnetizing Energy ($E_{demag}$)', axs[0, 0]),
-                ('anis', 'Equilibrium Anisotropy Energy ($E_{anis}$)', axs[0, 1]),
-                ('excha', 'Equilibrium Exchange Energy ($E_{excha}$)', axs[1, 0]),
-                ('exter', 'Equilibrium exter Energy ($E_{exter}$)', axs[1, 1])]
-    
-    for key, panel_title, ax in plot_map:
-        # Plot full profiles against the external field tracking array
-        ax.plot(Hext_range, full_data_fft[key], color='blue', lw=2, linestyle='-', label='FFT Engine Profile')
-        ax.plot(Hext_range, full_data_un[key], color='red', lw=2, linestyle='-', label='UNet Model Profile')
-        ax.set_title(panel_title, fontsize=11, fontweight='bold')
-        ax.set_xlabel('External Field $H_{ext}$ [Oe]', fontsize=10)
-        ax.set_ylabel('Energy [Joules]', fontsize=10)
-        
-        combined_vals = list(full_data_fft[key]) + list(full_data_un[key])
-        if len(combined_vals) > 0:
-            max_v, min_v = max(combined_vals), min(combined_vals)
-            v_range = max_v - min_v if max_v != min_v else 1.0
-            ymax = max_v + (v_range * 0.05)
-            ymin = -0.05 * max_v if min_v == 0.0 and max_v != 0.0 else min_v - (v_range * 0.05)
-            ax.set_ylim(ymin, ymax)
-            
-        ax.set_xlim(xmax_padded, xmin_padded) # Keeps standard reversing sweep profile view orientation
-        ax.grid(True, linestyle='--', alpha=0.4)
-        ax.legend(loc='upper right', fontsize=9)
-        
-    plt.tight_layout()
-    plt.savefig(os.path.join(full_energy_folder, 'full_equilibrium_energy_summary.png'), dpi=200)
-    plt.close()
 
-    fig_tot, ax_tot = plt.subplots(figsize=(9, 6))
-    fig_tot.suptitle(f"Total System Energy Profile Across M-H Sweep\n{general_title_summary}", fontsize=11, fontweight='bold')
-    
-    ax_tot.plot(Hext_range, full_data_fft['total'], color='blue', lw=2.5, linestyle='-', label='FFT Engine Profile')
-    ax_tot.plot(Hext_range, full_data_un['total'], color='red', lw=2.5, linestyle='-', label='UNet Model Profile')
-    ax_tot.set_title('Equilibrium Total System Energy ($E_{total}$)', fontsize=12, fontweight='bold')
-    ax_tot.set_xlabel('External Field $H_{ext}$ [Oe]', fontsize=11)
-    ax_tot.set_ylabel('Total Energy [Joules]', fontsize=11) 
-    
-    combined_tot = list(full_data_fft['total']) + list(full_data_un['total'])
-    if len(combined_tot) > 0:
-        max_v, min_v = max(combined_tot), min(combined_tot)
-        v_range = max_v - min_v if max_v != min_v else 1.0
-        ax_tot.set_ylim(min_v - (v_range * 0.05), max_v + (v_range * 0.05))
-        
-    ax_tot.set_xlim(xmax_padded, xmin_padded)
-    ax_tot.grid(True, linestyle='--', alpha=0.4)
-    ax_tot.legend(loc='upper right', fontsize=10)
-    
-    plt.tight_layout()
-    fig_tot.subplots_adjust(top=0.85)
-    plt.savefig(os.path.join(full_energy_folder, 'macro_total_energy_summary.png'), dpi=200)
-    plt.close()
+def plot_full_energy_summary(
+    general_title_summary,
+    save_path_summary,
+    full_data_fft,
+    full_data_unet,
+    hext_range,
+):
+    folder = _output_folder(save_path_summary)
+    fig, axes = plt.subplots(2, 2, figsize=(15, 11), sharex=True)
+    fig.suptitle(
+        "Full M-H Curve Energy Summary\n\n" + general_title_summary,
+        fontsize=13,
+        fontweight="bold",
+    )
 
-def plot_performance_summary(general_title_summary, save_path_summary, performance_fft, performance_un, Hext_range):
-    """
-    Generates a final 2x2 multi-panel chart compiling global optimization metrics,
-    topological structures, and execution times across the full Hext range.
-    """
-    performance_folder = os.path.join(save_path_summary, "summary_plots")
-    os.makedirs(performance_folder, exist_ok=True)
-    
-    fig, axs = plt.subplots(2, 2, figsize=(15, 11))
+    panels = (
+        ("demag", r"Demagnetizing Energy $E_{demag}$"),
+        ("anis", r"Anisotropy Energy $E_{anis}$"),
+        ("excha", r"Exchange Energy $E_{ex}$"),
+        ("exter", r"External-Field Energy $E_{ext}$"),
+    )
 
-    fig.suptitle("Performance Summary\n\n" + general_title_summary, fontsize=13, fontweight='bold')
-    
-    # Calculate uniform X-axis bounds with  5% padding
-    max_h, min_h = max(Hext_range), min(Hext_range)
-    h_range = max_h - min_h
-    xmax_padded = max_h + (h_range * 0.05)
-    xmin_padded = min_h - (h_range * 0.05)
-    
-    plot_map = [('iters', 'Solver Iterations Per Loop', 'Total Iteration Count/Hext Step', axs[0, 0]),
-                ('vortices', 'Topological Vortex Count', 'Absolute Vortex Population Count', axs[0, 1]),
-                ('mz', 'Mean Out-of-Plane Magnetization ($|M_z|$)', 'Average Absolute Magnitude $|M_z|$', axs[1, 0]),
-                ('time', 'Real-World Total Execution Time', 'Compute Duration [Seconds]', axs[1, 1])]
-    
-    for key, panel_title, y_label, ax in plot_map:
-        ax.plot(Hext_range, performance_fft[key], color='blue', lw=2, linestyle='-', label='FFT Engine Profile')
-        ax.plot(Hext_range, performance_un[key], color='red', lw=2, linestyle='-', label='UNet Model Profile')
-        ax.set_title(panel_title, fontsize=11, fontweight='bold')
-        ax.set_xlabel('External Field $H_{ext}$ [Oe]', fontsize=10)
-        ax.set_ylabel(y_label, fontsize=10)
-        
-        combined_vals = list(performance_fft[key]) + list(performance_un[key])
-        if len(combined_vals) > 0:
-            max_v, min_v = max(combined_vals), min(combined_vals)
-            v_range = max_v - min_v if max_v != min_v else 1.0
-            ymax = max_v + (v_range * 0.05)
-            
-            # check for fields like vortex counts or Mz that sit flat at 0.0
-            ymin = -0.05 * max_v if min_v == 0.0 and max_v != 0.0 else min_v - (v_range * 0.05)
-            ax.set_ylim(ymin, ymax)
-            
-        ax.set_xlim(xmax_padded, xmin_padded) # Keeps standard reversing sweep profile view orientation
-        ax.grid(True, linestyle='--', alpha=0.4)
-        ax.legend(loc='upper right', fontsize=9)
-        
-    plt.tight_layout()
-    plt.savefig(os.path.join(performance_folder, 'performance_summary.png'), dpi=200)
-    plt.close()
-
-def plot_error_summary(general_title_summary, save_path_summary, Hext_range, inst_hd_mae, traj_shift_mae, hex_err_mae, hanis_err_mae, y_limits=None):
-    """
-    Generates a final 2x2 multi-panel master report compiling all local field approximations,
-    historical path tracking drift, and intrinsic field deviations across the Hext sweep.
-    """
-    error_summary_folder = os.path.join(save_path_summary, "summary_plots")
-    os.makedirs(error_summary_folder, exist_ok=True)
-    
-    print("Generating comprehensive 4-panel error tracking analysis...")
-    fig, axs = plt.subplots(2, 2, figsize=(15, 12))
-    
-    default_y_limits = {"hd": (0.0, 400.0),
-                        "trajectory": (0.0, 0.75),
-                        "exchange": (0.0, 400.0),
-                        "anisotropy": (0.0, 400.0),}
-    
-    fixed_y_limits = default_y_limits.copy()
-    if y_limits is not None:
-        unknown_keys = set(y_limits) - set(default_y_limits)
-        if unknown_keys:
-            raise ValueError("Unknown plot_error_summary y-limit key(s): " + ", ".join(sorted(unknown_keys)))
-        fixed_y_limits.update(y_limits)
-
-    for name, limits in fixed_y_limits.items():
-        if len(limits) != 2 or limits[0] >= limits[1]:
-            raise ValueError(f"Invalid y-axis limits for {name}: {limits}. "
-                             f"Expected (minimum, maximum) with minimum < maximum.")
-
-    fig.suptitle("Field Component Error Summary\n\n" + general_title_summary, fontsize=13, fontweight='bold')
-    
-    # Calculate uniform X-axis limits with standard 5% padding while maintaining the reversed sweep
-    max_h, min_h = max(Hext_range), min(Hext_range)
-    h_range = max_h - min_h if max_h != min_h else 1.0
-    xmax_padded = max_h + (h_range * 0.05)
-    xmin_padded = min_h - (h_range * 0.05)
-    
-    # Structural Mapping Matrix to cycle configurations cleanly
-    plot_map = [(inst_hd_mae, 'darkorange', 'Total Unet Model $H_{demag}$ Approximation Error', '$H_{demag}$ Field Prediction Error', 'Instantaneous $H_{demag}$ MAE [Oe]', axs[0, 0], 'hd'),
-                (traj_shift_mae, 'crimson', 'Magnetization Trajectory Drift (Accumulated Error)', 'Predicted Magnetization Error', 'Cumulative Spin $\\vec{m}$ MAE', axs[0, 1], 'trajectory'),
-                (hex_err_mae, 'purple', 'Total Exchange Field ($H_{ex}$) Error Accumulation', '$H_{ex}$ Prediction Error', 'Exchange Field MAE [Oe]', axs[1, 0], 'exchange'),
-                (hanis_err_mae, 'teal', 'Total Anisotropy Field ($H_{anis}$) Error Accumulation', '$H_{anis}$ Prediction Error', 'Anisotropy Field MAE [Oe]', axs[1, 1], 'anisotropy')]
-    
-    for data, color, subtitle, label, y_label, ax, limit_key in plot_map:
-        data_array = np.asarray(data, dtype=float)
-        ymin, ymax = fixed_y_limits[limit_key]
-
-        ax.plot(Hext_range, data_array, color=color, lw=2, linestyle="-", label=label)
-        ax.set_title(subtitle, fontsize=11, fontweight="bold")
-        ax.set_xlabel("External Magnetic Field $H_{ext}$ [Oe]", fontsize=10)
-        ax.set_ylabel(y_label, fontsize=10)
-        ax.set_xlim(xmax_padded, xmin_padded)
-        ax.set_ylim(ymin, ymax)
-        ax.grid(True, linestyle="--", alpha=0.4)
-        ax.legend(loc="upper right", fontsize=9)
-
-        # Fixed limits can clip an unusually large run. Warn rather than
-        # silently hiding that fact.
-        finite_data = data_array[np.isfinite(data_array)]
-        if finite_data.size:
-            observed_min = float(np.min(finite_data))
-            observed_max = float(np.max(finite_data))
-            if observed_min < ymin or observed_max > ymax:
-                print(f"[plot_error_summary] WARNING: {limit_key} data range "
-                      f"({observed_min:.6g}, {observed_max:.6g}) exceeds the "
-                      f"fixed y-axis range ({ymin:.6g}, {ymax:.6g}).")
-
-    plt.tight_layout()
-    plt.savefig(os.path.join(error_summary_folder, "comprehensive_error_analysis.png"), dpi=300,)
-    plt.close()
-
-def plot_fields_summary(general_title_summary, save_path_summary, Hext_range, hex_mm, hex_un, hanis_mm, hanis_un, hd_mm, hd_un, heff_mm, heff_un):
-    """
-    Generates a 2x2 panel graph chart recording equilibrium 
-    magnitudes of all internal fields across the completed Hext sweep range.
-    """
-    fields_summary_folder = os.path.join(save_path_summary, "summary_plots")
-    os.makedirs(fields_summary_folder, exist_ok=True)
-    
-    print("Generating final 4-panel physical field summary plot...")
-    fig, axs = plt.subplots(2, 2, figsize=(15, 11))
-
-    fig.suptitle("Field Component Over Full MH Curve Summary\n\n" + general_title_summary, fontsize=13, fontweight='bold')
-    
-    max_h, min_h = max(Hext_range), min(Hext_range)
-    h_range = max_h - min_h if max_h != min_h else 1.0
-    xmax_padded = max_h + (h_range * 0.05)
-    xmin_padded = min_h - (h_range * 0.05)
-    
-    plot_map = [(hex_mm, hex_un, 'Exchange Field ($H_{ex}$)', 'Mean $H_{ex}$ Magnitude [Oe]', axs[0, 0]),
-                (hanis_mm, hanis_un, 'Anisotropy Field ($H_{anis}$)', 'Mean $H_{anis}$ Magnitude [Oe]', axs[0, 1]),
-                (hd_mm, hd_un, 'Demagnetizing Field ($H_{demag}$)', 'Mean $H_{demag}$ Magnitude [Oe]', axs[1, 0]),
-                (heff_mm, heff_un, 'Total Effective Field ($H_{eff}$)', 'Mean $H_{eff}$ Magnitude [Oe]', axs[1, 1])]
-    
-    for data_mm, data_un, panel_title, y_label, ax in plot_map:
-        ax.plot(Hext_range, data_mm, color='blue', lw=2.5, linestyle='-', label='FFT Simulator (mm)')
-        ax.plot(Hext_range, data_un, color='red', lw=2.5, linestyle='-', label='UNet Model (un)')
-        
-        ax.set_title(panel_title, fontsize=11, fontweight='bold')
-        ax.set_xlabel('External Field $H_{ext}$ [Oe] Summary', fontsize=10)
-        ax.set_ylabel(y_label, fontsize=10)
-        
-        combined_vals = list(data_mm) + list(data_un)
-        if len(combined_vals) > 0:
-            max_v, min_v = max(combined_vals), min(combined_vals)
-            v_range = max_v - min_v if max_v != min_v else 1.0
-            ymax = max_v + (v_range * 0.05)
-            
-            # check for fields like Anisotropy that are set to at 0.0
-            ymin = -0.05 * max_v if min_v == 0.0 and max_v != 0.0 else min_v - (v_range * 0.05)
-            ax.set_ylim(ymin, ymax)
-            
-        ax.set_xlim(xmax_padded, xmin_padded) # Reverses axis to match physical sweep direction
-        ax.grid(True, linestyle='-.', alpha=0.5)
-        ax.legend(loc='upper right', fontsize=9)
-        
-    plt.tight_layout()
-    plt.savefig(os.path.join(fields_summary_folder, 'all_internal_fields_mh_sweep.png'), dpi=300)
-    plt.close()
-
-def plot_torque_summary(general_title_summary, save_path_summary, Hext_range, torque_fft, torque_unet,):
-    """Plot mean |m x H| for the four field contributions across the M-H sweep."""
-    folder = os.path.join(save_path_summary, "summary_plots")
-    os.makedirs(folder, exist_ok=True)
-
-    fig, axs = plt.subplots(2, 2, figsize=(15, 11), sharex=True)
-    fig.suptitle("Torque Summary Over Full M-H Sweep\n\n" + general_title_summary, fontsize=13, fontweight="bold",)
-
-    panels = (("he", "Exchange Torque", r"Mean $|m \times H_{ex}|$ [Oe]"),
-              ("ha", "Anisotropy Torque", r"Mean $|m \times H_{anis}|$ [Oe]"),
-              ("hd", "Demagnetizing Torque", r"Mean $|m \times H_{demag}|$ [Oe]"),
-              ("heff", "Effective-Field Torque", r"Mean $|m \times H_{eff}|$ [Oe]"),)
-
-    for ax, (key, title, ylabel) in zip(axs.flat, panels):
-        ax.plot(Hext_range, torque_fft[key], lw=2.4, label="FFT/LLG")
-        ax.plot(Hext_range, torque_unet[key], lw=2.4, label="UNet/LLG")
+    for ax, (key, title) in zip(axes.flat, panels):
+        ax.plot(hext_range, full_data_fft[key], lw=2.2, label="FFT/LLG")
+        ax.plot(hext_range, full_data_unet[key], lw=2.2, label="UNet/LLG")
         ax.set_title(title, fontsize=11, fontweight="bold")
         ax.set_xlabel(r"External Field $H_{ext}$ [Oe]")
-        ax.set_ylabel(ylabel)
-        _set_reversed_hext_axis(ax, Hext_range)
+        ax.set_ylabel("MAG2305 energy value [cgs code units]")
+        _set_reversed_hext_axis(ax, hext_range)
         ax.grid(True, linestyle="--", alpha=0.4)
         ax.legend(fontsize=9)
 
     fig.tight_layout()
-    fig.savefig(os.path.join(folder, "summary_torques_vs_hext.png"), dpi=300, bbox_inches="tight",)
+    fig.savefig(
+        os.path.join(folder, "full_equilibrium_energy_summary.png"),
+        dpi=300,
+        bbox_inches="tight",
+    )
     plt.close(fig)
 
-
-def plot_alignment_summary(general_title_summary, save_path_summary, Hext_range, alignment_fft, alignment_unet,):
-    """
-    Plot mean spin-field cosine alignment for the four field contributions.
-    """
-    folder = os.path.join(save_path_summary, "summary_plots")
-    os.makedirs(folder, exist_ok=True)
-
-    fig, axs = plt.subplots(2, 2, figsize=(15, 11), sharex=True)
-    fig.suptitle("Alignment Summary Over Full M-H Sweep\n\n" + general_title_summary, fontsize=13, fontweight="bold",)
-
-    panels = (("he", "Exchange Alignment", r"Mean $\cos\theta(m,H_{ex})$"),
-              ("ha", "Anisotropy Alignment", r"Mean $\cos\theta(m,H_{anis})$"),
-              ("hd", "Demagnetizing Alignment", r"Mean $\cos\theta(m,H_{demag})$"),
-              ("heff", "Effective-Field Alignment", r"Mean $\cos\theta(m,H_{eff})$"),)
-
-    for ax, (key, title, ylabel) in zip(axs.flat, panels):
-        ax.plot(Hext_range, alignment_fft[key], lw=2.4, label="FFT/LLG")
-        ax.plot(Hext_range, alignment_unet[key], lw=2.4, label="UNet/LLG")
-        ax.set_title(title, fontsize=11, fontweight="bold")
-        ax.set_xlabel(r"External Field $H_{ext}$ [Oe]")
-        ax.set_ylabel(ylabel)
-        ax.set_ylim(-1.05, 1.05)
-        _set_reversed_hext_axis(ax, Hext_range)
-        ax.grid(True, linestyle="--", alpha=0.4)
-        ax.legend(fontsize=9)
-
-    fig.tight_layout()
-    fig.savefig(os.path.join(folder, "summary_alignments_vs_hext.png"), dpi=300, bbox_inches="tight",)
-    plt.close(fig)
-
-def plot_transition_spatial_error_summary(general_title_summary,save_path_summary, hd_error_map, spin_error_map, winding_context_map=None, core_occupancy_map=None, transition_count=None,):
-    """
-    Generates a transition-focused spatial summary.
-
-    Panels:
-      1) mean spatial Hdemag MAE over detected transition steps
-      2) mean spatial magnetization MAE over detected transition steps
-      3) vortex-core occupancy map
-      4) magnetization MAE duplicated with vortex-core occupancy contour overlay
-    """
-    folder = os.path.join(save_path_summary, "summary_plots")
-    os.makedirs(folder, exist_ok=True)
-
-    hd_error_map = np.asarray(hd_error_map, dtype=float)
-    spin_error_map = np.asarray(spin_error_map, dtype=float)
-
-    has_core_context = core_occupancy_map is not None
-
-    fig, axs = plt.subplots(2, 2, figsize=(14, 12))
-    fig.suptitle("Transition-Peak Spatial Error and Vortex Summary\n\n" + general_title_summary + 
-                 (f"\nAveraged over {transition_count} detected transition event(s)." 
-                  if transition_count is not None else ""), fontsize=13, fontweight="bold",)
-
-    hd_vmax = float(np.nanmax(hd_error_map)) if np.isfinite(hd_error_map).any() else 1.0
-    spin_vmax = float(np.nanmax(spin_error_map)) if np.isfinite(spin_error_map).any() else 1.0
-    hd_vmax = hd_vmax if hd_vmax > 0 else 1.0
-    spin_vmax = spin_vmax if spin_vmax > 0 else 1.0
-
-    # ------------------------------------------------------------------
-    # Panel 1: Hdemag MAE
-    # ------------------------------------------------------------------
-    im0 = axs[0, 0].imshow(hd_error_map.T, cmap='hot', origin='lower', vmin=0.0, vmax=hd_vmax)
-    axs[0, 0].set_title("Mean Spatial Hdemag MAE", fontsize=11, fontweight='bold')
-    axs[0, 0].set_xlabel("x [cell]")
-    axs[0, 0].set_ylabel("y [cell]")
-    fig.colorbar(im0, ax=axs[0, 0], label="Mean absolute component error [Oe]")
-
-    # ------------------------------------------------------------------
-    # Panel 2: magnetization MAE
-    # ------------------------------------------------------------------
-    im1 = axs[0, 1].imshow(spin_error_map.T, cmap='hot', origin='lower', vmin=0.0, vmax=spin_vmax)
-    axs[0, 1].set_title("Mean Spatial Magnetization MAE", fontsize=11, fontweight='bold')
-    axs[0, 1].set_xlabel("x [cell]")
-    axs[0, 1].set_ylabel("y [cell]")
-    fig.colorbar(im1, ax=axs[0, 1], label="Mean absolute component error in m")
-
-    # ------------------------------------------------------------------
-    # Panel 3: vortex-core occupancy
-    # ------------------------------------------------------------------
-    if has_core_context:
-        core_occupancy_map = np.asarray(core_occupancy_map, dtype=float)
-        im2 = axs[1, 0].imshow(core_occupancy_map.T, cmap='magma', origin='lower', vmin=0.0, vmax=1.0)
-        axs[1, 0].set_title("FFT Vortex-Core Occupancy at Transition Peaks", fontsize=11, fontweight='bold')
-        axs[1, 0].set_xlabel("x [cell]")
-        axs[1, 0].set_ylabel("y [cell]")
-        fig.colorbar(im2, ax=axs[1, 0], label="Fraction of transition events")
-    else:
-        axs[1, 0].axis("off")
-        axs[1, 0].text(0.5, 0.5, "No vortex-core map provided", ha="center", va="center", transform=axs[1, 0].transAxes)
-
-    # ------------------------------------------------------------------
-    # Panel 4: magnetization MAE with vortex-core overlay
-    # ------------------------------------------------------------------
-    im3 = axs[1, 1].imshow(spin_error_map.T, cmap='hot', origin='lower', vmin=0.0, vmax=spin_vmax)
-    axs[1, 1].set_title("Magnetization MAE with FFT Vortex-Core Overlay", fontsize=11, fontweight='bold')
-    axs[1, 1].set_xlabel("x [cell]")
-    axs[1, 1].set_ylabel("y [cell]")
-    fig.colorbar(im3, ax=axs[1, 1], label="Mean absolute component error in m")
-
-    if has_core_context and np.nanmax(core_occupancy_map) > 0:
-        # Contour at any nonzero occupancy. For many events, you could raise this threshold.
-        axs[1, 1].contour(core_occupancy_map.T, levels=[1e-12], colors='cyan', linewidths=1.5, origin='lower')
-
-    fig.tight_layout()
-    plt.savefig(os.path.join(folder, "transition_spatial_error_summary.png"), dpi=300, bbox_inches='tight')
-    plt.close(fig)
-
-
-def plot_error_correlations(general_title_summary, save_path_summary,hd_error, hex_error, hanis_error, traj_error, Hext_range):
-    """
-    Generates scatter plots comparing each internal field error to the
-    trajectory error over the entire hysteresis sweep.
-    """
-    fields_summary_folder = os.path.join(save_path_summary, "summary_plots")
-    os.makedirs(fields_summary_folder, exist_ok=True)
-
-    fig, axs = plt.subplots(1, 3, figsize=(16, 5.5), sharey=True, constrained_layout=True)
-
-    datasets = [(hd_error, "Demagnetizing Field $H_{demag}$ [Oe] Error"), 
-                (hex_error, "Exchange Field $H_{ex}$ [Oe] Error"), 
-                (hanis_error, "Anisotropy Field $H_{anis}$ [Oe] Error")]
-
-    for ax, (x, xlabel) in zip(axs, datasets):
-        x = np.asarray(x)
-        y = np.asarray(traj_error)                 #TODO: check after if values need ax.set_xscale("log") ax.set_yscale("log")
-        result = linregress(x, y)
-        xx = np.linspace(x.min(), x.max(), 200)
-
-        slope = result.slope
-        intercept = result.intercept
-        r = result.rvalue
-        p = result.pvalue
-        r2 = r**2
-
-        if Hext_range is not None:
-            sc = ax.scatter(x, y, s=25, alpha=0.85, c=Hext_range, cmap="coolwarm")
-        else:
-            sc = ax.scatter(x, y, s=25, alpha=0.75)
-        
-        ax.plot(xx, slope * xx + intercept, '--', linewidth=2, color='black')
-        ax.set_xlabel(xlabel)
-        ax.grid(alpha=0.3)
-
-        textbox = (f"r = {r:.3f}\n"
-                   f"$R^2$ = {r2:.3f}\n"
-                   f"p = {p:.2e}")
-
-        ax.text(0.04, 0.96, textbox, transform=ax.transAxes, va='top',fontsize=10, bbox=dict(facecolor='white', alpha=0.9))
-
-    if Hext_range is not None:
-        fig.colorbar(sc, ax=axs, label="$H_{ext}$ [Oe]", shrink=0.8)
-
-    axs[0].set_ylabel("Trajectory Error")
-    fig.suptitle("Correlation Between Internal Field Errors and Trajectory Error\n\n" + general_title_summary, fontsize=13, fontweight='bold')
-
-    plt.savefig(os.path.join(fields_summary_folder, "error_correlations.png"), dpi=300, bbox_inches="tight")
-    plt.close()
-
-
-def plot_error_vs_transition_proximity(general_title_summary, save_path_summary,trajectory_error, vortex_count, max_window=15, event_type='both'):
-    """
-    Bin trajectory error by "frames since nearest topological event"
-    (vortex nucleation or annihilation, detected as a change in vortex
-    count between consecutive Hext steps) and plot the resulting decay/
-    rise curve.
-    """
-    folder = os.path.join(save_path_summary, "summary_plots")
-    os.makedirs(folder, exist_ok=True)
- 
-    error = np.asarray(trajectory_error, dtype=float)
-    vortices = np.asarray(vortex_count, dtype=float)
-    dv = np.diff(vortices)
- 
-    if event_type == 'nucleation':
-        event_indices = np.where(dv > 0)[0] + 1
-    elif event_type == 'annihilation':
-        event_indices = np.where(dv < 0)[0] + 1
-    else:
-        event_indices = np.where(dv != 0)[0] + 1
- 
-    if len(event_indices) == 0:
-        print("[plot_error_vs_transition_proximity] No topological events "
-              "(vortex count changes) detected; skipping.")
-        return None
- 
-    # Align a window of error values around every event, padding with NaN
-    # at the sweep edges so events near the boundary don't bias the mean.
-    n = len(error)
-    aligned = np.full((len(event_indices), 2 * max_window + 1), np.nan)
-    for row, ev in enumerate(event_indices):
-        for offset in range(-max_window, max_window + 1):
-            idx = ev + offset
-            if 0 <= idx < n:
-                aligned[row, offset + max_window] = error[idx]
- 
-    mean_curve = np.nanmean(aligned, axis=0)
-    std_curve = np.nanstd(aligned, axis=0)
-    x = np.arange(-max_window, max_window + 1)
- 
     fig, ax = plt.subplots(figsize=(9, 6))
- 
-    fig.suptitle("Trajectory Error Aligned to Topological Events\n\n" + general_title_summary, fontsize=12, fontweight='bold')
- 
-    ax.plot(x, mean_curve, color='crimson', lw=2.5, label='Mean trajectory error')
-    ax.fill_between(x, mean_curve - std_curve, mean_curve + std_curve, color='crimson', alpha=0.2, label='+/- 1 std')
-    ax.axvline(0, color='black', linestyle='--', lw=1, alpha=0.7, label='Event (vortex count change)')
- 
-    ax.set_xlabel('Hext steps relative to event')
-    ax.set_ylabel('Trajectory error (MAE)')
-    ax.grid(alpha=0.3)
+    ax.plot(hext_range, full_data_fft["total"], lw=2.5, label="FFT/LLG")
+    ax.plot(hext_range, full_data_unet["total"], lw=2.5, label="UNet/LLG")
+    ax.set_title("Total MAG2305 Energy Across the M-H Sweep\n" + general_title_summary)
+    ax.set_xlabel(r"External Field $H_{ext}$ [Oe]")
+    ax.set_ylabel("MAG2305 energy value [cgs code units]")
+    _set_reversed_hext_axis(ax, hext_range)
+    ax.grid(True, linestyle="--", alpha=0.4)
     ax.legend(fontsize=9)
- 
-    plt.tight_layout()
-    plt.savefig(os.path.join(folder, f'error_vs_transition_proximity_{event_type}.png'), dpi=250)
-    plt.close()
- 
-    return {'x': x, 'mean_curve': mean_curve, 'std_curve': std_curve, 'n_events': len(event_indices), 'event_indices': event_indices}
- 
- 
-def plot_ablation_comparison_table(general_title_summary, ablation_results, base_path):
-    """
-    Creates a summary table (as a saved figure + CSV) comparing peak error
-    and total accumulated error across different model variants, e.g.
-    full FFT vs. woHd ablation vs. UNet-Hd 
-    """
-    folder = os.path.join(base_path, "summary_plots")
-    os.makedirs(folder, exist_ok=True)
- 
-    rows = []
-    for name, data in ablation_results.items():
-        err = np.asarray(data["trajectory_error"], dtype=float)
-        rows.append({"Variant": name, 
-                     "Peak Error": float(np.max(err)),
-                     "Mean Error": float(np.mean(err)),
-                     "Total Accumulated Error": float(np.sum(err)),
-                     "Std Error": float(np.std(err)),})
- 
-    table_df = pd.DataFrame(rows).sort_values("Total Accumulated Error").reset_index(drop=True)
- 
-    csv_path = os.path.join(folder, "ablation_comparison.csv")
-    table_df.to_csv(csv_path, index=False)
- 
-    fig, ax = plt.subplots(figsize=(10, 1.2 + 0.5 * len(table_df)))
-    ax.axis('off')
- 
-    ax.set_title("Model Variant Ablation Comparison\n" + general_title_summary, fontsize=12, fontweight='bold', pad=20)
- 
-    display_df = table_df.copy()
-    for col in ["Peak Error", "Mean Error", "Total Accumulated Error", "Std Error"]:
-        display_df[col] = display_df[col].map(lambda v: f"{v:.4e}")
- 
-    tbl = ax.table(cellText=display_df.values, colLabels=display_df.columns, cellLoc='center', loc='center')
-    tbl.auto_set_font_size(False)
-    tbl.set_fontsize(10)
-    tbl.scale(1, 1.6)
- 
-    for col_idx in range(len(display_df.columns)):
-        tbl[0, col_idx].set_facecolor('#4C72B0')
-        tbl[0, col_idx].set_text_props(color='white', fontweight='bold')
- 
-    plt.tight_layout()
-    plt.savefig(os.path.join(folder, "ablation_comparison_table.png"), dpi=200, bbox_inches='tight')
-    plt.close()
- 
-    return table_df
- 
-
-def plot_hd_error_vs_vortex_cores(general_title_summary, save_path_summary,film1, film2, nloop, core_threshold=0.5):
-    """
-    Overlay the spatial Hd (demag field) error map with the locations of
-    vortex cores, identified from winding density. This directly tests
-    whether U-Net Hd error is spatially co-located with topological defects,
-    rather than just temporally correlated with a scalar vortex count.
- 
-    core_threshold : float
-        Minimum |winding density| (per-cell, already normalized by pi in
-        misc.winding_density) to call a cell part of a vortex core. Cores
-        are usually only a few cells wide with |winding density| close to
-        its local extremum, so 0.3-0.6 is a reasonable starting point;
-        tune by eye against a few spatial_topology_loop_*.png plots first.
-    """
-    folder = os.path.join(save_path_summary, "hd_error_vs_cores")
-    os.makedirs(folder, exist_ok=True)
- 
-    Hd_mm = film1.Hd.detach().cpu().numpy()[:, :, 0, :]
-    Hd_un = film2.Hd.detach().cpu().numpy()[:, :, 0, :]
-    hd_error_map = np.linalg.norm(Hd_un - Hd_mm, axis=-1)
- 
-    spin_fft_tensor = film1.Spin.permute(3, 0, 1, 2)[:, :, :, 0].unsqueeze(0)
-    topo_fft_raw, winding_abs_fft, _ = winding_density(spin_fft_tensor)
-    topo_fft = topo_fft_raw.squeeze().detach().cpu().numpy()
- 
-    core_mask = np.abs(topo_fft) > core_threshold
-    core_ys, core_xs = np.where(core_mask)
- 
-    fig, ax = plt.subplots(figsize=(8, 7))
-
-    fig.suptitle("Demag Field Error vs. Vortex Core Locations\n\n" + general_title_summary, fontsize=12, fontweight='bold')
- 
-    im = ax.imshow(hd_error_map, cmap='hot', origin='lower')
-    fig.colorbar(im, ax=ax, label='$|H_{demag,un} - H_{demag,mm}|$ [Oe]')
- 
-    if len(core_xs) > 0:
-        ax.scatter(core_xs, core_ys, s=40, facecolors='none', edgecolors='cyan',
-                   linewidths=1.5, label=f'Vortex core cells (n={len(core_xs)})')
-        ax.legend(loc='upper right', fontsize=9)
- 
-    ax.set_xlabel('x [cell index]')
-    ax.set_ylabel('y [cell index]')
- 
-    plt.tight_layout()
-    plt.savefig(os.path.join(folder, f'hd_error_vs_cores_loop_{nloop}.png'), dpi=150)
-    plt.close()
- 
-    # Return a simple quantitative co-localization metric: mean Hd error
-    # inside vs. outside the vortex-core mask. If error is concentrated at
-    # cores, mean_error_at_cores should be substantially larger.
-    if core_mask.sum() > 0:
-        mean_error_at_cores = hd_error_map[core_mask].mean()
-        mean_error_elsewhere = hd_error_map[~core_mask].mean() if (~core_mask).sum() > 0 else np.nan
-    else:
-        mean_error_at_cores = np.nan
-        mean_error_elsewhere = hd_error_map.mean()
- 
-    return {'mean_error_at_cores': float(mean_error_at_cores),
-            'mean_error_elsewhere': float(mean_error_elsewhere),
-            'n_core_cells': int(core_mask.sum())}
-
-def plot_colocalization_summary(general_title_summary, save_path_summary, Hext_range, coloc_rcd):
-    """
-    Sweep-level view of plot_hd_error_vs_vortex_cores: mean Hd error at vortex
-    cores vs. elsewhere, as a function of Hext, to see whether spatial
-    co-localization strengthens near switching fields.
-    """
-    folder = os.path.join(save_path_summary, "summary_plots")
-    os.makedirs(folder, exist_ok=True)
-
-    at_cores = np.array([r['mean_error_at_cores'] for r in coloc_rcd])
-    elsewhere = np.array([r['mean_error_elsewhere'] for r in coloc_rcd])
-    n_cells = np.array([r['n_core_cells'] for r in coloc_rcd])
-
-    fig, axs = plt.subplots(2, 1, figsize=(11, 8), sharex=True)
-
-    axs[0].plot(Hext_range, at_cores, color='crimson', lw=2, label='Mean error at vortex cores')
-    axs[0].plot(Hext_range, elsewhere, color='steelblue', lw=2, label='Mean error elsewhere')
-    axs[0].set_ylabel('Mean $H_{demag}$ error [Oe]')
-    axs[0].legend(fontsize=9)
-    axs[0].grid(alpha=0.3)
-
-    axs[1].plot(Hext_range, n_cells, color='black', lw=1.5)
-    axs[1].set_ylabel('# vortex-core cells')
-    axs[1].set_xlabel('$H_{ext}$ [Oe]')
-    axs[1].grid(alpha=0.3)
-
-    fig.suptitle("Hd Error / Vortex-Core Co-localization Across Sweep\n" + general_title_summary, fontsize=12, fontweight='bold')
-
-    plt.tight_layout()
-    plt.savefig(os.path.join(folder, "colocalization_summary.png"), dpi=250)
-    plt.close()
+    fig.tight_layout()
+    fig.savefig(
+        os.path.join(folder, "total_energy_summary.png"),
+        dpi=300,
+        bbox_inches="tight",
+    )
+    plt.close(fig)
 
 
-def plot_temporal_variance_vs_error(general_title_summary, save_path_summary, Hext_range, temporal_var_rcd, trajectory_error):
-    """
-    Tests whether compute_temporal_hd_variance (a model-internal signal,
-    no ground truth needed) tracks actual trajectory error -- i.e. whether
-    it's a usable uncertainty proxy at inference time.
-    """
-    folder = os.path.join(save_path_summary, "summary_plots")
-    os.makedirs(folder, exist_ok=True)
+def plot_performance_summary(
+    general_title_summary,
+    save_path_summary,
+    performance_fft,
+    performance_unet,
+    hext_range,
+):
+    folder = _output_folder(save_path_summary)
+    fig, axes = plt.subplots(2, 2, figsize=(15, 11), sharex=True)
+    fig.suptitle(
+        "Performance Summary\n\n" + general_title_summary,
+        fontsize=13,
+        fontweight="bold",
+    )
 
-    Hext_range = np.asarray(Hext_range, dtype=float)
-    var = np.asarray(temporal_var_rcd, dtype=float)
-    err = np.asarray(trajectory_error, dtype=float)
-    valid = ~np.isnan(var) & ~np.isnan(err)
+    panels = (
+        ("iters", "Solver Iterations per Field Step", "Iteration count"),
+        ("vortices", "Detected Vortex/Core Components", "Component count"),
+        ("mz", r"Mean Out-of-Plane Magnetization $|m_z|$", r"Mean $|m_z|$"),
+        ("time", "Execution Time per Field Step", "Runtime [s]"),
+    )
 
-    fig, axs = plt.subplots(1, 2, figsize=(13, 5.5))
+    for ax, (key, title, ylabel) in zip(axes.flat, panels):
+        ax.plot(hext_range, performance_fft[key], lw=2.2, label="FFT/LLG")
+        ax.plot(hext_range, performance_unet[key], lw=2.2, label="UNet/LLG")
+        ax.set_title(title, fontsize=11, fontweight="bold")
+        ax.set_xlabel(r"External Field $H_{ext}$ [Oe]")
+        ax.set_ylabel(ylabel)
+        _set_reversed_hext_axis(ax, hext_range)
+        ax.grid(True, linestyle="--", alpha=0.4)
+        ax.legend(fontsize=9)
 
-    line1, = axs[0].plot(Hext_range, var, color='darkorange', lw=2, label='Temporal Hd variance (model-internal)')
-    ax_twin = axs[0].twinx()
-    line2, = ax_twin.plot(Hext_range, err, color='crimson', lw=1.5, alpha=0.6, label='Trajectory error')
-    axs[0].set_xlabel('$H_{ext}$ [Oe]')
-    axs[0].set_ylabel('Temporal Hd variance', color='darkorange')
-    ax_twin.set_ylabel('Trajectory error', color='crimson')
-    axs[0].tick_params(axis='y', labelcolor='darkorange')
-    ax_twin.tick_params(axis='y', labelcolor='crimson')
-    axs[0].grid(alpha=0.3)
-    axs[0].legend(handles=[line1, line2], loc='upper right', fontsize=9)
+    fig.tight_layout()
+    fig.savefig(
+        os.path.join(folder, "performance_summary.png"),
+        dpi=300,
+        bbox_inches="tight",
+    )
+    plt.close(fig)
 
-    r = np.corrcoef(var[valid], err[valid])[0, 1] if valid.sum() > 1 else np.nan
-    sc = axs[1].scatter(var[valid], err[valid], s=20, alpha=0.7, c=Hext_range[valid], cmap='coolwarm')
-    axs[1].set_xlabel('Temporal Hd variance')
-    axs[1].set_ylabel('Trajectory error')
-    axs[1].text(0.05, 0.95, f"r = {r:.3f}", transform=axs[1].transAxes, va='top',
-                bbox=dict(facecolor='white', alpha=0.9))
-    axs[1].grid(alpha=0.3)
-    fig.colorbar(sc, ax=axs[1], label='$H_{ext}$ [Oe]')
 
-    fig.suptitle("Temporal Hd Variance as an Uncertainty Proxy\n" + general_title_summary, fontsize=12, fontweight='bold')
+def plot_error_summary(
+    general_title_summary,
+    save_path_summary,
+    hext_range,
+    inst_hd_mae,
+    trajectory_mae,
+    exchange_field_mae,
+    anisotropy_field_mae,
+    y_limits=None,
+):
+    folder = _output_folder(save_path_summary)
+    print("Generating comprehensive 4-panel error tracking analysis...")
 
-    plt.tight_layout()
-    plt.savefig(os.path.join(folder, "temporal_variance_vs_error.png"), dpi=250)
-    plt.close()
+    default_limits = {
+        "hd": (0.0, 400.0),
+        "trajectory": (0.0, 0.75),
+        "exchange": (0.0, 400.0),
+        "anisotropy": (0.0, 400.0),
+    }
+    fixed_limits = default_limits.copy()
+    if y_limits is not None:
+        fixed_limits.update(y_limits)
 
-def compute_temporal_hd_variance(hd_history_buffer):
-    """
-    Given a short history of the U-Net's own Hd predictions at this cell,
-    compute the per-cell variance across that history as a proxy for "the model
-    itself is uncertain here". 
+    fig, axes = plt.subplots(2, 2, figsize=(15, 12), sharex=True)
+    fig.suptitle(
+        "Field and Magnetization Error Summary\n\n" + general_title_summary,
+        fontsize=13,
+        fontweight="bold",
+    )
 
-    Returns
-    -------
-    variance_map : ndarray, shape (W, W) or (W, W, D)
-        Per-cell variance of |Hd| across the k history steps.
-    mean_variance : float
-        Spatial mean of variance_map -- use this as a scalar predictor,
-        the same way instantaneous_hd_mae etc. are used in `predictors`.
-    """
-    hd_history_buffer = np.asarray(hd_history_buffer)
-    hd_mag_history = np.linalg.norm(hd_history_buffer, axis=-1)  # (k, W, W[, D])
-    variance_map = np.var(hd_mag_history, axis=0)
-    mean_variance = float(np.mean(variance_map))
-    return variance_map, mean_variance
+    panels = (
+        (
+            inst_hd_mae,
+            "UNet Demagnetizing-Field Error",
+            r"$H_{demag}$ component MAE [Oe]",
+            "hd",
+        ),
+        (
+            trajectory_mae,
+            "Magnetization Trajectory Error",
+            r"Magnetization component MAE",
+            "trajectory",
+        ),
+        (
+            exchange_field_mae,
+            "Exchange-Field Error",
+            r"$H_{ex}$ component MAE [Oe]",
+            "exchange",
+        ),
+        (
+            anisotropy_field_mae,
+            "Anisotropy-Field Error",
+            r"$H_{anis}$ component MAE [Oe]",
+            "anisotropy",
+        ),
+    )
 
+    for ax, (data, title, ylabel, key) in zip(axes.flat, panels):
+        values = np.asarray(data, dtype=float)
+        ax.plot(hext_range, values, lw=2.2, label=title)
+        ax.set_title(title, fontsize=11, fontweight="bold")
+        ax.set_xlabel(r"External Field $H_{ext}$ [Oe]")
+        ax.set_ylabel(ylabel)
+        ax.set_ylim(*fixed_limits[key])
+        _set_reversed_hext_axis(ax, hext_range)
+        ax.grid(True, linestyle="--", alpha=0.4)
+        ax.legend(fontsize=9)
+
+        finite = values[np.isfinite(values)]
+        if finite.size and (
+            float(np.min(finite)) < fixed_limits[key][0]
+            or float(np.max(finite)) > fixed_limits[key][1]
+        ):
+            print(
+                f"[plot_error_summary] WARNING: {key} data exceed fixed "
+                f"limits {fixed_limits[key]}."
+            )
+
+    fig.tight_layout()
+    fig.savefig(
+        os.path.join(folder, "comprehensive_error_analysis.png"),
+        dpi=300,
+        bbox_inches="tight",
+    )
+    plt.close(fig)
+
+
+def plot_fields_summary(
+    general_title_summary,
+    save_path_summary,
+    hext_range,
+    he_fft,
+    he_unet,
+    ha_fft,
+    ha_unet,
+    hd_fft,
+    hd_unet,
+    heff_fft,
+    heff_unet,
+):
+    folder = _output_folder(save_path_summary)
+    print("Generating final 4-panel physical field summary plot...")
+
+    fig, axes = plt.subplots(2, 2, figsize=(15, 11), sharex=True)
+    fig.suptitle(
+        "Field Components Across the M-H Sweep\n\n" + general_title_summary,
+        fontsize=13,
+        fontweight="bold",
+    )
+
+    panels = (
+        (he_fft, he_unet, r"Exchange Field $H_{ex}$"),
+        (ha_fft, ha_unet, r"Anisotropy Field $H_{anis}$"),
+        (hd_fft, hd_unet, r"Demagnetizing Field $H_{demag}$"),
+        (heff_fft, heff_unet, r"Effective Field $H_{eff}$"),
+    )
+
+    for ax, (fft_data, unet_data, title) in zip(axes.flat, panels):
+        ax.plot(hext_range, fft_data, lw=2.3, label="FFT/LLG")
+        ax.plot(hext_range, unet_data, lw=2.3, label="UNet/LLG")
+        ax.set_title(title, fontsize=11, fontweight="bold")
+        ax.set_xlabel(r"External Field $H_{ext}$ [Oe]")
+        ax.set_ylabel("Mean field magnitude [Oe]")
+        _set_reversed_hext_axis(ax, hext_range)
+        ax.grid(True, linestyle="--", alpha=0.4)
+        ax.legend(fontsize=9)
+
+    fig.tight_layout()
+    fig.savefig(
+        os.path.join(folder, "all_internal_fields_mh_sweep.png"),
+        dpi=300,
+        bbox_inches="tight",
+    )
+    plt.close(fig)
+
+
+def plot_torque_summary(
+    general_title_summary,
+    save_path_summary,
+    hext_range,
+    torque_fft,
+    torque_unet,
+):
+    folder = _output_folder(save_path_summary)
+    fig, axes = plt.subplots(2, 2, figsize=(15, 11), sharex=True)
+    fig.suptitle(
+        "Torque Summary Across the M-H Sweep\n\n" + general_title_summary,
+        fontsize=13,
+        fontweight="bold",
+    )
+
+    panels = (
+        ("he", "Exchange Torque", r"Mean $|m\times H_{ex}|$ [Oe]"),
+        ("ha", "Anisotropy Torque", r"Mean $|m\times H_{anis}|$ [Oe]"),
+        ("hd", "Demagnetizing Torque", r"Mean $|m\times H_{demag}|$ [Oe]"),
+        ("heff", "Effective-Field Torque", r"Mean $|m\times H_{eff}|$ [Oe]"),
+    )
+
+    for ax, (key, title, ylabel) in zip(axes.flat, panels):
+        ax.plot(hext_range, torque_fft[key], lw=2.3, label="FFT/LLG")
+        ax.plot(hext_range, torque_unet[key], lw=2.3, label="UNet/LLG")
+        ax.set_title(title, fontsize=11, fontweight="bold")
+        ax.set_xlabel(r"External Field $H_{ext}$ [Oe]")
+        ax.set_ylabel(ylabel)
+        _set_reversed_hext_axis(ax, hext_range)
+        ax.grid(True, linestyle="--", alpha=0.4)
+        ax.legend(fontsize=9)
+
+    fig.tight_layout()
+    fig.savefig(
+        os.path.join(folder, "summary_torques_vs_hext.png"),
+        dpi=300,
+        bbox_inches="tight",
+    )
+    plt.close(fig)
+
+
+def plot_torque_error_summary(
+    general_title_summary,
+    save_path_summary,
+    hext_range,
+    torque_error_history,
+):
+    """Plot causal same-state and accumulated demag torque errors."""
+    folder = _output_folder(save_path_summary)
+    fig, axes = plt.subplots(2, 2, figsize=(15, 11), sharex=True)
+    fig.suptitle(
+        "Demagnetizing-Field Torque Error Across the M-H Sweep\n\n"
+        + general_title_summary,
+        fontsize=13,
+        fontweight="bold",
+    )
+
+    panels = (
+        (
+            "same_state_hd_vector_error_mean",
+            "Same-State UNet Demag-Field Error",
+            r"Mean $|H_d^{UNet}(m_{FFT})-H_d^{FFT}(m_{FFT})|$ [Oe]",
+        ),
+        (
+            "same_state_torque_error_mean",
+            "Same-State Torque-Producing Error",
+            r"Mean $|m_{FFT}\times\Delta H_d|$ [Oe]",
+        ),
+        (
+            "trajectory_demag_torque_mismatch_mean",
+            "Full-Trajectory Demag Torque Mismatch",
+            r"Mean $|m_U\times H_{d,U}-m_F\times H_{d,F}|$ [Oe]",
+        ),
+        (
+            "trajectory_demag_llg_drive_mismatch_mean",
+            "Full-Trajectory Demag LLG-Drive Mismatch",
+            r"Mean demag-drive mismatch [Oe]",
+        ),
+    )
+
+    for ax, (key, title, ylabel) in zip(axes.flat, panels):
+        ax.plot(hext_range, torque_error_history[key], lw=2.3, label=title)
+        ax.set_title(title, fontsize=11, fontweight="bold")
+        ax.set_xlabel(r"External Field $H_{ext}$ [Oe]")
+        ax.set_ylabel(ylabel)
+        _set_reversed_hext_axis(ax, hext_range)
+        ax.grid(True, linestyle="--", alpha=0.4)
+        ax.legend(fontsize=8)
+
+    fig.tight_layout()
+    fig.savefig(
+        os.path.join(folder, "demag_torque_error_summary_vs_hext.png"),
+        dpi=300,
+        bbox_inches="tight",
+    )
+    plt.close(fig)
+
+
+def plot_loop_change_error_overlays(
+    general_title_summary,
+    save_path_summary,
+    hext_range,
+    error_histories: Mapping[str, Sequence[float]],
+    loop_change_fft: Mapping[str, Sequence[float]],
+    loop_change_unet: Mapping[str, Sequence[float]],
+):
+    """Create exact four-panel rate/error overlays for all retained signals."""
+    folder = _output_folder(save_path_summary)
+
+    error_panels = (
+        ("hd", r"$H_{demag}$ Error", r"$H_{demag}$ MAE [Oe]"),
+        ("spin", "Magnetization Trajectory Error", "Magnetization MAE"),
+        ("he", r"$H_{ex}$ Error", r"$H_{ex}$ MAE [Oe]"),
+        ("ha", r"$H_{anis}$ Error", r"$H_{anis}$ MAE [Oe]"),
+    )
+
+    signal_specs = (
+        (
+            "gradient_loop_abs_change_per_oe",
+            "Gradient-Magnitude Rate Over Error Curves",
+            r"Mean $|\Delta|\nabla m||/|\Delta H_{ext}|$ [cell$^{-1}$/Oe]",
+            "gradient_rate_per_oe_over_errors.png",
+        ),
+        (
+            "gradient_tensor_loop_abs_change_per_oe",
+            "Full Gradient-Tensor Rate Over Error Curves",
+            r"Mean $||\nabla(m_i-m_{i-1})||_F/|\Delta H_{ext}|$ "
+            r"[cell$^{-1}$/Oe]",
+            "gradient_tensor_rate_per_oe_over_errors.png",
+        ),
+        (
+            "exchange_energy_density_loop_abs_change_per_oe",
+            "Exchange-Energy-Density Rate Over Error Curves",
+            r"Mean $|\Delta\epsilon_{ex}|/|\Delta H_{ext}|$ "
+            r"[erg cm$^{-3}$/Oe]",
+            "exchange_energy_density_rate_per_oe_over_errors.png",
+        ),
+        (
+            "winding_map_loop_abs_change_per_oe",
+            "Winding-Density Rate Over Error Curves",
+            r"Mean $|\Delta w|/|\Delta H_{ext}|$ [Oe$^{-1}$]",
+            "winding_density_rate_per_oe_over_errors.png",
+        ),
+    )
+
+    for signal_key, figure_title, signal_ylabel, filename in signal_specs:
+        fig, axes = plt.subplots(2, 2, figsize=(16, 11), sharex=True)
+        fig.suptitle(
+            figure_title + "\n\n" + general_title_summary,
+            fontsize=13,
+            fontweight="bold",
+        )
+
+        for ax, (error_key, panel_title, error_ylabel) in zip(
+            axes.flat, error_panels
+        ):
+            error_values = np.asarray(error_histories[error_key], dtype=float)
+            fft_values = np.asarray(loop_change_fft[signal_key], dtype=float)
+            unet_values = np.asarray(loop_change_unet[signal_key], dtype=float)
+
+            ax.plot(
+                hext_range,
+                error_values,
+                linewidth=2.1,
+                color="black",
+                label=panel_title,
+            )
+            ax.set_title(panel_title, fontsize=11, fontweight="bold")
+            ax.set_xlabel(r"External Field $H_{ext}$ [Oe]")
+            ax.set_ylabel(error_ylabel)
+            ax.grid(True, linestyle="--", alpha=0.35)
+            _set_reversed_hext_axis(ax, hext_range)
+
+            twin = ax.twinx()
+            twin.plot(
+                hext_range,
+                fft_values,
+                linewidth=2.0,
+                color="tab:blue",
+                label="FFT rate",
+            )
+            twin.plot(
+                hext_range,
+                unet_values,
+                linewidth=2.0,
+                linestyle="--",
+                color="tab:red",
+                label="UNet rate",
+            )
+            twin.set_ylabel(signal_ylabel)
+            _combined_legend(ax, twin)
+
+        fig.tight_layout()
+        fig.savefig(
+            os.path.join(folder, filename),
+            dpi=300,
+            bbox_inches="tight",
+        )
+        plt.close(fig)
 
