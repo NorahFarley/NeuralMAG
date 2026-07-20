@@ -44,6 +44,7 @@ from plots import (
     plot_loop_change_error_overlays,
     plot_magnetization_gradient_vs_hext,
     plot_performance_summary,
+    plot_physics_vector_rate_summary,
     plot_torque_error_summary,
     plot_torque_summary,
     plot_training_winding_density_vs_hext,
@@ -203,6 +204,69 @@ def _exchange_density_loop_change(
         )
 
     return result
+
+
+def _vector_map_loop_change(
+    current_map: torch.Tensor,
+    previous_map: Optional[torch.Tensor],
+    current_active_mask: torch.Tensor,
+    previous_active_mask: Optional[torch.Tensor],
+    delta_hext_oe: Optional[float],
+    metric_name: str,
+) -> Dict[str, float]:
+    """Exact loop-to-loop change of a vector-valued spatial map.
+
+    The vector difference is taken cell by cell first, then its Euclidean
+    magnitude is spatially averaged over cells active in both states.
+    """
+    mean_key = f"{metric_name}_loop_abs_change_mean"
+    per_oe_key = f"{metric_name}_loop_abs_change_per_oe"
+    result = {mean_key: float("nan"), per_oe_key: float("nan")}
+
+    if previous_map is None or previous_active_mask is None:
+        return result
+
+    compare_mask = current_active_mask & previous_active_mask
+    difference_magnitude = torch.linalg.vector_norm(
+        current_map - previous_map,
+        dim=-1,
+    )
+    selected = difference_magnitude[compare_mask]
+    if selected.numel() == 0:
+        return result
+
+    change = float(selected.mean().item())
+    result[mean_key] = change
+
+    if delta_hext_oe is not None and abs(float(delta_hext_oe)) > 0.0:
+        result[per_oe_key] = change / abs(float(delta_hext_oe))
+
+    return result
+
+
+@torch.no_grad()
+def _physics_vector_maps(model, damping: float) -> Dict[str, torch.Tensor]:
+    """Return vector maps used for exact loop-to-loop rate diagnostics.
+
+    ``total_llg_drive_vector`` reproduces MAG2305's field-scale LLG drive
+    before multiplication by the gyromagnetic factor and time step:
+
+        damping * ((m x H_eff) x m) - (m x H_eff)
+
+    ``model.Heff`` must already include the external field.
+    """
+    exchange_torque = torch.cross(model.Spin, model.He, dim=-1)
+    demag_torque = torch.cross(model.Spin, model.Hd, dim=-1)
+    effective_torque = torch.cross(model.Spin, model.Heff, dim=-1)
+    damping_drive = torch.cross(effective_torque, model.Spin, dim=-1)
+    total_llg_drive = float(damping) * damping_drive - effective_torque
+
+    return {
+        "exchange_field_vector": model.He,
+        "exchange_torque_vector": exchange_torque,
+        "demag_torque_vector": demag_torque,
+        "total_llg_drive_vector": total_llg_drive,
+    }
 
 
 def _masked_mean(values: torch.Tensor, mask: torch.Tensor) -> float:
@@ -507,6 +571,14 @@ def main() -> None:
         "exchange_proxy_loop_abs_change_per_oe",
         "exchange_energy_density_loop_abs_change_mean",
         "exchange_energy_density_loop_abs_change_per_oe",
+        "exchange_field_vector_loop_abs_change_mean",
+        "exchange_field_vector_loop_abs_change_per_oe",
+        "exchange_torque_vector_loop_abs_change_mean",
+        "exchange_torque_vector_loop_abs_change_per_oe",
+        "demag_torque_vector_loop_abs_change_mean",
+        "demag_torque_vector_loop_abs_change_per_oe",
+        "total_llg_drive_vector_loop_abs_change_mean",
+        "total_llg_drive_vector_loop_abs_change_per_oe",
         "winding_map_loop_abs_change_mean",
         "winding_map_loop_abs_change_per_oe",
     )
@@ -524,6 +596,8 @@ def main() -> None:
 
     previous_fft_exchange_density_map = None
     previous_unet_exchange_density_map = None
+    previous_fft_vector_maps: Optional[Dict[str, torch.Tensor]] = None
+    previous_unet_vector_maps: Optional[Dict[str, torch.Tensor]] = None
     previous_fft_active_mask = None
     previous_unet_active_mask = None
 
@@ -627,6 +701,14 @@ def main() -> None:
 
         current_fft_exchange_density_map = _exchange_energy_density_map(film_fft)
         current_unet_exchange_density_map = _exchange_energy_density_map(film_unet)
+        current_fft_vector_maps = _physics_vector_maps(
+            film_fft,
+            damping=args.damping,
+        )
+        current_unet_vector_maps = _physics_vector_maps(
+            film_unet,
+            damping=args.damping,
+        )
         current_fft_active_mask = (
             torch.linalg.vector_norm(film_fft.Spin, dim=-1) > 1.0e-12
         )
@@ -653,12 +735,54 @@ def main() -> None:
             )
         )
 
+        for metric_name, current_map in current_fft_vector_maps.items():
+            previous_map = (
+                None
+                if previous_fft_vector_maps is None
+                else previous_fft_vector_maps[metric_name]
+            )
+            fft_loop_change.update(
+                _vector_map_loop_change(
+                    current_map=current_map,
+                    previous_map=previous_map,
+                    current_active_mask=current_fft_active_mask,
+                    previous_active_mask=previous_fft_active_mask,
+                    delta_hext_oe=delta_hext_oe if nloop > 0 else None,
+                    metric_name=metric_name,
+                )
+            )
+
+        for metric_name, current_map in current_unet_vector_maps.items():
+            previous_map = (
+                None
+                if previous_unet_vector_maps is None
+                else previous_unet_vector_maps[metric_name]
+            )
+            unet_loop_change.update(
+                _vector_map_loop_change(
+                    current_map=current_map,
+                    previous_map=previous_map,
+                    current_active_mask=current_unet_active_mask,
+                    previous_active_mask=previous_unet_active_mask,
+                    delta_hext_oe=delta_hext_oe if nloop > 0 else None,
+                    metric_name=metric_name,
+                )
+            )
+
         previous_fft_exchange_density_map = (
             current_fft_exchange_density_map.detach().clone()
         )
         previous_unet_exchange_density_map = (
             current_unet_exchange_density_map.detach().clone()
         )
+        previous_fft_vector_maps = {
+            key: value.detach().clone()
+            for key, value in current_fft_vector_maps.items()
+        }
+        previous_unet_vector_maps = {
+            key: value.detach().clone()
+            for key, value in current_unet_vector_maps.items()
+        }
         previous_fft_active_mask = current_fft_active_mask.detach().clone()
         previous_unet_active_mask = current_unet_active_mask.detach().clone()
 
@@ -933,6 +1057,13 @@ def main() -> None:
         hext_range,
         spatial_fft,
         spatial_unet,
+        loop_change_fft,
+        loop_change_unet,
+    )
+    plot_physics_vector_rate_summary(
+        general_title_summary,
+        str(summary_dir),
+        hext_range,
         loop_change_fft,
         loop_change_unet,
     )

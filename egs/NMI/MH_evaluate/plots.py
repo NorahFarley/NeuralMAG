@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 """Requested M-H diagnostics for the NeuralMAG accuracy project.
 
-Only plots explicitly retained by the user are included:
-
 - error summary
 - torque summary
 - torque-error summary
@@ -14,7 +12,8 @@ Only plots explicitly retained by the user are included:
 - winding-density summary
 - gradient-magnitude, full gradient-tensor, and exchange rate-of-change summary
 - exact rate/error overlay figures for gradient magnitude, gradient tensor,
-  exchange-energy density, and winding density
+  exchange-energy density, exchange-field vector, exchange-torque vector,
+  demagnetizing-torque vector, total LLG drive, and winding density
 """
 
 from __future__ import annotations
@@ -605,6 +604,73 @@ def plot_gradient_change_rate_summary(
     plt.close(fig)
 
 
+def plot_physics_vector_rate_summary(
+    general_title_summary,
+    save_path_summary,
+    hext_range,
+    loop_fft,
+    loop_unet,
+):
+    """Four-panel summary of exact vector-map rates between M-H states.
+
+    Every quantity is calculated cell by cell as the Euclidean magnitude of
+    the vector difference, spatially averaged, and divided by |delta Hext|.
+    The total LLG drive is MAG2305's field-scale drive before multiplication
+    by the gyromagnetic factor and time step.
+    """
+    folder = _output_folder(save_path_summary)
+    fig, axes = plt.subplots(2, 2, figsize=(16, 11), sharex=True)
+    fig.suptitle(
+        "Vector Physics Rates Across the M-H Sweep\n\n"
+        + general_title_summary,
+        fontsize=13,
+        fontweight="bold",
+    )
+
+    panels = (
+        (
+            "exchange_field_vector_loop_abs_change_per_oe",
+            "Exchange-Field Vector Rate",
+            r"Mean $||\Delta H_{ex}||_2/|\Delta H_{ext}|$ [Oe/Oe]",
+        ),
+        (
+            "exchange_torque_vector_loop_abs_change_per_oe",
+            "Exchange-Torque Vector Rate",
+            r"Mean $||\Delta(m\times H_{ex})||_2/|\Delta H_{ext}|$ "
+            r"[Oe/Oe]",
+        ),
+        (
+            "demag_torque_vector_loop_abs_change_per_oe",
+            "Demagnetizing-Torque Vector Rate",
+            r"Mean $||\Delta(m\times H_d)||_2/|\Delta H_{ext}|$ "
+            r"[Oe/Oe]",
+        ),
+        (
+            "total_llg_drive_vector_loop_abs_change_per_oe",
+            "Total Reduced-LLG-Drive Vector Rate",
+            r"Mean $||\Delta F_{LLG}||_2/|\Delta H_{ext}|$ [Oe/Oe]",
+        ),
+    )
+
+    for ax, (key, title, ylabel) in zip(axes.flat, panels):
+        ax.plot(hext_range, loop_fft[key], lw=2.3, label="FFT/LLG")
+        ax.plot(hext_range, loop_unet[key], lw=2.3, label="UNet/LLG")
+        ax.set_title(title, fontsize=11, fontweight="bold")
+        ax.set_xlabel(r"External Field $H_{ext}$ [Oe]")
+        ax.set_ylabel(ylabel)
+        _set_reversed_hext_axis(ax, hext_range)
+        ax.grid(True, linestyle="--", alpha=0.4)
+        ax.legend(fontsize=9)
+
+    fig.tight_layout()
+    fig.savefig(
+        os.path.join(folder, "physics_vector_rate_summary_vs_hext.png"),
+        dpi=300,
+        bbox_inches="tight",
+    )
+    plt.close(fig)
+
+
 def plot_full_energy_summary(
     general_title_summary,
     save_path_summary,
@@ -978,6 +1044,32 @@ def plot_loop_change_error_overlays(
             "exchange_energy_density_rate_per_oe_over_errors.png",
         ),
         (
+            "exchange_field_vector_loop_abs_change_per_oe",
+            "Exchange-Field Vector Rate Over Error Curves",
+            r"Mean $||\Delta H_{ex}||_2/|\Delta H_{ext}|$ [Oe/Oe]",
+            "exchange_field_vector_rate_per_oe_over_errors.png",
+        ),
+        (
+            "exchange_torque_vector_loop_abs_change_per_oe",
+            "Exchange-Torque Vector Rate Over Error Curves",
+            r"Mean $||\Delta(m\times H_{ex})||_2/|\Delta H_{ext}|$ "
+            r"[Oe/Oe]",
+            "exchange_torque_vector_rate_per_oe_over_errors.png",
+        ),
+        (
+            "demag_torque_vector_loop_abs_change_per_oe",
+            "Demagnetizing-Torque Vector Rate Over Error Curves",
+            r"Mean $||\Delta(m\times H_d)||_2/|\Delta H_{ext}|$ "
+            r"[Oe/Oe]",
+            "demag_torque_vector_rate_per_oe_over_errors.png",
+        ),
+        (
+            "total_llg_drive_vector_loop_abs_change_per_oe",
+            "Total Reduced-LLG-Drive Rate Over Error Curves",
+            r"Mean $||\Delta F_{LLG}||_2/|\Delta H_{ext}|$ [Oe/Oe]",
+            "total_llg_drive_vector_rate_per_oe_over_errors.png",
+        ),
+        (
             "winding_map_loop_abs_change_per_oe",
             "Winding-Density Rate Over Error Curves",
             r"Mean $|\Delta w|/|\Delta H_{ext}|$ [Oe$^{-1}$]",
@@ -1012,6 +1104,17 @@ def plot_loop_change_error_overlays(
             ax.set_ylabel(error_ylabel)
             ax.grid(True, linestyle="--", alpha=0.35)
             _set_reversed_hext_axis(ax, hext_range)
+
+            # MAE values cannot be negative. Matplotlib otherwise places
+            # artificial negative ticks around an all-zero history, such as
+            # H_anis error when Ku = 0.
+            finite_error = error_values[np.isfinite(error_values)]
+            if finite_error.size:
+                error_max = float(np.max(finite_error))
+                if error_max > 0.0:
+                    ax.set_ylim(0.0, 1.05 * error_max)
+                else:
+                    ax.set_ylim(0.0, 1.0)
 
             twin = ax.twinx()
             twin.plot(
