@@ -52,7 +52,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument('--mask-min-points', type=int, default=3)
     parser.add_argument('--mask-max-points', type=int, default=0, help='0 means w-1, matching the broad point-count range of the repository generator',)
-    parser.add_argument('--output-root', type=str, default='./Dataset/temporal')
+    parser.add_argument('--output-root', type=str, default='./Dataset/rate_change')
     parser.add_argument('--allow-unconverged', action='store_true', help='save a trajectory that reaches max_iter before the convergence threshold',)
     parser.add_argument('--overwrite', action='store_true', help='replace an existing output directory for the same masked/unmasked seed',)
     return parser
