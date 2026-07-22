@@ -6,7 +6,7 @@ set -Eeuo pipefail
 # SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # cd "$SCRIPT_DIR"
 
-GRID_SIZE=32
+GRID_SIZE=128
 MASKED_NUM=200
 UNMASKED_NUM=100
 SEED_START=0
