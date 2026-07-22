@@ -12,7 +12,7 @@ UNMASKED_NUM=100
 SEED_START=0
 HEXT='random'
 
-python -u utils.gen_data_new.py \
+python -m utils.gen_data_new.py \
     --w $GRID_SIZE \
     --field-mode $HEXT \
     --seed-start $SEED_START \
