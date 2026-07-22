@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+export PYTHONPATH=$(dirname $(pwd)):$PYTHONPATH
 
 # # Run from the directory containing this script and gen_data_new.py.
 # SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -12,7 +13,7 @@ UNMASKED_NUM=100
 SEED_START=0
 HEXT='random'
 
-python -u ./gen_data_new.py \
+python -u utils.gen_data_new.py \
     --w $GRID_SIZE \
     --field-mode $HEXT \
     --seed-start $SEED_START \
