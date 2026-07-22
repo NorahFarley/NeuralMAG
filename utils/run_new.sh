@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+export PYTHONPATH=$(dirname $(pwd)):$PYTHONPATH
+
 # Run from the directory containing this script and gen_data_new.py.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
