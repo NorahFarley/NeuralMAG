@@ -1,5 +1,4 @@
-#!/usr/bin/env bash
-set -Eeuo pipefail
+#!/bin/bash
 
 export PYTHONPATH=$(dirname $(pwd)):$PYTHONPATH
 
