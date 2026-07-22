@@ -1,6 +1,6 @@
 #!/bin/bash
 
-export PYTHONPATH=$(dirname $(dirname $(dirname $(pwd)))):$PYTHONPATH
+export PYTHONPATH=$(dirname $(pwd)):$PYTHONPATH
 
 GRID_SIZE=128
 MASKED_NUM=200
