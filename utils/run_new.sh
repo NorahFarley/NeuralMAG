@@ -1,10 +1,12 @@
 #!/bin/bash
 
-export PYTHONPATH=$(dirname $(pwd)):$PYTHONPATH
+set -euo pipefail
 
-# # Run from the directory containing this script and gen_data_new.py.
-# SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# cd "$SCRIPT_DIR"
+# Absolute path to the NeuralMAG repository.
+PROJECT_ROOT="/lustre/home/farleyn/NeuralMAG"
+PYTHON_SCRIPT="${PROJECT_ROOT}/utils/gen_data_new.py"
+
+cd "${PROJECT_ROOT}"
 
 GRID_SIZE=128
 MASKED_NUM=200
@@ -12,7 +14,7 @@ UNMASKED_NUM=100
 SEED_START=0
 HEXT='random'
 
-python -m utils.gen_data_new.py \
+python "${PYTHON_SCRIPT}" \
     --w $GRID_SIZE \
     --field-mode $HEXT \
     --seed-start $SEED_START \
