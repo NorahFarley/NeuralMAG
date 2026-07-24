@@ -72,6 +72,46 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
             wd2 = gradient_magnitude(x2)**2
             wd3 = gradient_magnitude(x3)**2
 
+        elif args.loss_type == "gradient_mag_rate":
+            wd1 = gradient_magnitude_rate(x1, x1_prev)
+            wd2 = gradient_magnitude_rate(x2, x2_prev)
+            wd3 = gradient_magnitude_rate(x3, x3_prev)
+
+        elif args.loss_type == "gradient_tensor_rate":
+            wd1 = gradient_tensor_rate(x1, x1_prev)
+            wd2 = gradient_tensor_rate(x2, x2_prev)
+            wd3 = gradient_tensor_rate(x3, x3_prev)
+
+        elif args.loss_type == "exch_field_rate":
+            wd1 = exchange_field_rate(x1, x1_prev)            
+            wd2 = exchange_field_rate(x2, x2_prev)
+            wd3 = exchange_field_rate(x3, x3_prev)
+
+        elif args.loss_type == "exch_torque_rate":
+            wd1 = exchange_torque_rate(x1, x1_prev)
+            wd2 = exchange_torque_rate(x2, x2_prev)
+            wd3 = exchange_torque_rate(x3, x3_prev)
+
+        elif args.loss_type == "exch_e_density_rate":
+            wd1 = exchange_energy_density_rate(x1, x1_prev)
+            wd2 = exchange_energy_density_rate(x2, x2_prev)
+            wd3 = exchange_energy_density_rate(x3, x3_prev)
+
+        elif args.loss_type == "demag_torque_rate":
+            wd1 = demag_torque_rate(x1, x1_prev, y1, y1_prev)
+            wd2 = demag_torque_rate(x2, x2_prev, y2, y2_prev)
+            wd3 = demag_torque_rate(x3, x3_prev, y3, y4_prev)
+
+        elif args.loss_type == "demag_field_rate":
+            wd1 = demag_field_rate(y1, y1_prev)
+            wd2 = demag_field_rate(x2, x2_prev)
+            wd3 = demag_field_rate(x3, x3_prev)
+
+        elif args.loss_type == "winding_density_rate":
+            wd1 = winding_density_rate(x1, x1_prev)
+            wd2 = winding_density_rate(x2, x2_prev)
+            wd3 = winding_density_rate(x3, x3_prev)
+
         else:
             raise ValueError(f"Unknown loss_type: {args.loss_type}")
 
