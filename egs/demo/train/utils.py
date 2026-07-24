@@ -33,9 +33,6 @@ class AverageMeter(object):
         self.avg = self.sum / self.count
 
 
-
-
-
 def tensor2rgb(tensor1, tensor2, tensor3, save_path):
     tensor1 = tensor1.to(torch.float)
     tensor2 = tensor2.to(torch.float)
@@ -52,7 +49,6 @@ def tensor2rgb(tensor1, tensor2, tensor3, save_path):
 
     # 保存为 png 文件
     vutils.save_image(combined_image, save_path, normalize=True)
-
 
 
 def vectorgraph(t1, t2, t3, save_path):
@@ -83,10 +79,6 @@ def vectorgraph(t1, t2, t3, save_path):
     plt.close()
 
 
-
-
-
-
 def create_mask(tensor):
     with torch.no_grad():
         device = tensor.device  # 获取张量所在的设备
@@ -97,8 +89,10 @@ def mse(x, y):
     mse_tensor = torch.square(x-y)
     return mse_tensor
 
+
 def SLA(x):
     return torch.where(x >= 0, torch.log(x+1), -torch.log(-x+1))
+
 
 def ISLA(x):
     return torch.where(x >= 0, torch.exp(x)-1, -torch.exp(-x)+1)
@@ -132,6 +126,7 @@ def winding_density(spin_batch):
 
     return winding_density, torch.round(winding_abs).cpu().numpy()
 
+
 def magnetic_divergence(spin_batch):
     """
     Computes magnetic charge density for a batch of magnetization fields
@@ -160,213 +155,12 @@ def magnetic_divergence(spin_batch):
 
     return charge
 
-def gradient_magnitude(spin_batch):
-    """
-    Computes magnitude of spatial magnetization gradient
-
-    Args:
-        spin_batch: Tensor of shape (batch, 3, H, W)
-
-    Returns:
-        grad_mag: Tensor of shape (batch, H, W)
-    """
-
-    grad_sq = 0.0
-
-    for c in range(3):
-
-        M = spin_batch[:, c]
-
-        M_xp = torch.roll(M, shifts=-1, dims=1)
-        M_xm = torch.roll(M, shifts=1, dims=1)
-
-        M_yp = torch.roll(M, shifts=-1, dims=2)
-        M_ym = torch.roll(M, shifts=1, dims=2)
-
-        # replicate edge values
-        M_xp[:, -1, :] = M[:, -1, :]
-        M_xm[:,  0, :] = M[:,  0, :]
-
-        M_yp[:, :, -1] = M[:, :, -1]
-        M_ym[:, :,  0] = M[:, :,  0]
-
-        dMx = (M_xp - M_xm) / 2
-        dMy = (M_yp - M_ym) / 2
-
-        grad_sq += dMx**2 + dMy**2
-
-    grad_mag = torch.sqrt(grad_sq)
-
-    return grad_mag
-
-import torch
-import torch
-
-
-def gradient_magnitude2(spin_batch, dx=1.0,dy=1.0, dz=1.0, eps=0.0,):
-    """
-    Calculate the magnitude of the spatial gradient of normalized
-    magnetization m = (mx, my, mz).
-
-    Supported input shapes
-    ----------------------
-    2D:
-        (batch, 3, Nx, Ny)
-
-        Calculates:
-            sqrt(sum_c[(dm_c/dx)^2 + (dm_c/dy)^2])
-
-    3D:
-        (batch, 3, Nx, Ny, Nz)
-
-        Calculates:
-            sqrt(sum_c[
-                (dm_c/dx)^2
-                + (dm_c/dy)^2
-                + (dm_c/dz)^2
-            ])
-
-    Args:
-        spin_batch:
-            Normalized magnetization tensor.
-
-        dx, dy, dz:
-            Spatial cell sizes. Use 1.0 to measure gradients per cell.
-
-        eps:
-            Optional small value added inside the square root.
-
-    Returns:
-        For 2D input:
-            Tensor of shape (batch, Nx, Ny)
-
-        For 3D input:
-            Tensor of shape (batch, Nx, Ny, Nz)
-    """
-
-    if spin_batch.ndim not in (4, 5):
-        raise ValueError(
-            "spin_batch must have shape "
-            "(batch, 3, Nx, Ny) or "
-            "(batch, 3, Nx, Ny, Nz), "
-            f"but received {tuple(spin_batch.shape)}."
-        )
-
-    if spin_batch.shape[1] != 3:
-        raise ValueError(
-            "spin_batch must contain exactly three magnetization "
-            "channels: mx, my, and mz."
-        )
-
-    if dx <= 0 or dy <= 0 or dz <= 0:
-        raise ValueError("dx, dy, and dz must all be positive.")
-
-    is_3d = spin_batch.ndim == 5
-
-    nx = spin_batch.shape[2]
-    ny = spin_batch.shape[3]
-
-    if nx < 2 or ny < 2:
-        raise ValueError(
-            "Nx and Ny must each contain at least two cells."
-        )
-
-    if is_3d:
-        nz = spin_batch.shape[4]
-
-        if nz < 2:
-            raise ValueError(
-                "A spatial z derivative requires at least two z layers. "
-                "For Nz=1, dm/dz cannot be inferred from the data."
-            )
-
-    # Same spatial shape as one magnetization component.
-    grad_sq = torch.zeros_like(spin_batch[:, 0])
-
-    # Loop over mx, my, and mz.
-    for component in range(3):
-        m = spin_batch[:, component]
-
-        dm_dx = torch.empty_like(m)
-        dm_dy = torch.empty_like(m)
-
-        # ----------------------------------------------------------
-        # x derivative
-        # ----------------------------------------------------------
-
-        # Centered differences for interior cells.
-        dm_dx[:, 1:-1, ...] = (
-            m[:, 2:, ...] - m[:, :-2, ...]
-        ) / (2.0 * dx)
-
-        # One-sided differences at the x boundaries.
-        dm_dx[:, 0, ...] = (
-            m[:, 1, ...] - m[:, 0, ...]
-        ) / dx
-
-        dm_dx[:, -1, ...] = (
-            m[:, -1, ...] - m[:, -2, ...]
-        ) / dx
-
-        # ----------------------------------------------------------
-        # y derivative
-        # ----------------------------------------------------------
-
-        if is_3d:
-            dm_dy[:, :, 1:-1, :] = (
-                m[:, :, 2:, :] - m[:, :, :-2, :]
-            ) / (2.0 * dy)
-
-            dm_dy[:, :, 0, :] = (
-                m[:, :, 1, :] - m[:, :, 0, :]
-            ) / dy
-
-            dm_dy[:, :, -1, :] = (
-                m[:, :, -1, :] - m[:, :, -2, :]
-            ) / dy
-
-        else:
-            dm_dy[:, :, 1:-1] = (
-                m[:, :, 2:] - m[:, :, :-2]
-            ) / (2.0 * dy)
-
-            dm_dy[:, :, 0] = (
-                m[:, :, 1] - m[:, :, 0]
-            ) / dy
-
-            dm_dy[:, :, -1] = (
-                m[:, :, -1] - m[:, :, -2]
-            ) / dy
-
-        grad_sq = grad_sq + dm_dx.square() + dm_dy.square()
-
-        # ----------------------------------------------------------
-        # z derivative for genuinely 3D data
-        # ----------------------------------------------------------
-
-        if is_3d:
-            dm_dz = torch.empty_like(m)
-
-            dm_dz[:, :, :, 1:-1] = (
-                m[:, :, :, 2:] - m[:, :, :, :-2]
-            ) / (2.0 * dz)
-
-            dm_dz[:, :, :, 0] = (
-                m[:, :, :, 1] - m[:, :, :, 0]
-            ) / dz
-
-            dm_dz[:, :, :, -1] = (
-                m[:, :, :, -1] - m[:, :, :, -2]
-            ) / dz
-
-            grad_sq = grad_sq + dm_dz.square()
-
-    return torch.sqrt(grad_sq + eps)
 
 def print_memory(msg=""):
     process = psutil.Process(os.getpid())
     mem = process.memory_info().rss / (1024**3)
     print(f"{msg} | RAM: {mem:.2f} GB", flush=True)
+
 
 def tensor_rotate(tensor, symtype=None):
     #spins(bsz,w,h,channel)
@@ -400,7 +194,6 @@ def tensor_rotate(tensor, symtype=None):
         return spinrt270.permute(0,3,1,2)
      
 
-
 def dataug(x,y):
     symtype=['R90', 'R180', 'R270', 'RX', 'RY']    
     selected_symmetry = random.choice(symtype)
@@ -414,7 +207,6 @@ def dataug(x,y):
     x_combine = torch.cat((x, xr), dim=0)
     y_combine = torch.cat((y, yr), dim=0)
     return x_combine, y_combine
-
 
 
 def visualize(mode, epoch, ex_path, x, y, ISLA_y, size):
@@ -440,363 +232,52 @@ def visualize(mode, epoch, ex_path, x, y, ISLA_y, size):
     visualize_layer(0, 'L1')
     visualize_layer(3, 'L2')
 
+
+def demag_torque_mismatch_loss(spin_batch, predicted_hd, true_hd, active_threshold=1.0e-12):
+    """
+    Mean squared demagnetizing-torque mismatch over magnetic cells:
+
+        || m x (Hdemag_pred - Hdemag_true) ||^2
+
+    predicted_hd and true_hd must both be in physical Hdemag units.
+    Therefore call this using ISLA(pred_y), NOT pred_y.
+    """
+    _same_shape(spin_batch, predicted_hd, "spin/predicted Hd")
+    _same_shape(spin_batch, true_hd, "spin/true Hd")
+
+    m = _nm_channels_to_grid(spin_batch)
+
+    hd_error = (_nm_channels_to_grid(predicted_hd) - _nm_channels_to_grid(true_hd))
+    torque_error = torch.linalg.cross(m, hd_error, dim=-1)
+    torque_error_sq = torch.sum(torque_error.square(), dim=-1)
+
+    active = (torch.linalg.vector_norm(m, dim=-1) > active_threshold)
+    active_count = active.sum().clamp_min(1)
+
+    return (torque_error_sq * active.to(torque_error_sq.dtype)).sum() / active_count
+
 # ------------------------------------------------------------------------
 # RATE OF CHANGE FUNCTIONS
 # ------------------------------------------------------------------------
-import torch
-
-
-def _temporal_spin_to_5d(spin_batch):
-    """
-    Convert NeuralMAG channel-first bilayer data to explicit layers.
-
-    Input:
-        (B, 3*L, Nx, Ny)
-    Output:
-        (B, 3, Nx, Ny, L)
-
-    Channel order is assumed to be:
-        [L0_mx, L0_my, L0_mz, L1_mx, L1_my, L1_mz, ...]
-    which matches gen_data_new.py's reshape from (Nx, Ny, layers, 3).
-    """
-    if spin_batch.ndim != 4:
-        raise ValueError(
-            "spin_batch must have shape (batch, 3*layers, Nx, Ny), "
-            f"but received {tuple(spin_batch.shape)}."
-        )
-
-    batch, channels, nx, ny = spin_batch.shape
-
-    if channels % 3 != 0:
-        raise ValueError(
-            "The channel count must be divisible by 3 "
-            "(mx, my, mz for each layer)."
-        )
-
-    layers = channels // 3
-
-    return (
-        spin_batch.reshape(batch, layers, 3, nx, ny)
-        .permute(0, 2, 3, 4, 1)
-        .contiguous()
-    )
-
-
-def _active_geometry(spin_5d, threshold=1.0e-12):
-    """
-    Return magnetic-cell mask with shape (B, Nx, Ny, L).
-    """
-    return torch.linalg.vector_norm(spin_5d, dim=1) > threshold
-
-
-def _masked_first_derivative(values, active, dim, spacing):
-    """
-    First spatial derivative without differentiating through nonmagnetic cells.
-
-    values:
-        (B, 3, Nx, Ny, L)
-    active:
-        (B, Nx, Ny, L)
-    dim:
-        Spatial dimension in values: 2=x, 3=y, 4=z.
-
-    Interior cells with two magnetic neighbors use a centered difference.
-    Cells with only one magnetic neighbor use a one-sided difference.
-    Cells with no magnetic neighbor, and nonmagnetic cells, get derivative 0.
-    """
-    if spacing <= 0:
-        raise ValueError("Spatial spacing must be positive.")
-
-    active5 = active.unsqueeze(1)
-
-    plus = torch.roll(values, shifts=-1, dims=dim)
-    minus = torch.roll(values, shifts=1, dims=dim)
-
-    plus_active = torch.roll(active5, shifts=-1, dims=dim)
-    minus_active = torch.roll(active5, shifts=1, dims=dim)
-
-    # Invalidate wrapped neighbors at physical array boundaries.
-    plus_slice = [slice(None)] * values.ndim
-    plus_slice[dim] = -1
-    plus_active[tuple(plus_slice)] = False
-
-    minus_slice = [slice(None)] * values.ndim
-    minus_slice[dim] = 0
-    minus_active[tuple(minus_slice)] = False
-
-    both = active5 & plus_active & minus_active
-    only_plus = active5 & plus_active & ~minus_active
-    only_minus = active5 & minus_active & ~plus_active
-
-    derivative = torch.zeros_like(values)
-
-    centered = (plus - minus) / (2.0 * spacing)
-    forward = (plus - values) / spacing
-    backward = (values - minus) / spacing
-
-    derivative = torch.where(both, centered, derivative)
-    derivative = torch.where(only_plus, forward, derivative)
-    derivative = torch.where(only_minus, backward, derivative)
-
-    return derivative
-
-
-def magnetization_gradient_tensor(spin_batch, dx=1.0, dy=1.0, dz=1.0, active_mask=None, active_threshold=1.0e-12,):
-    """
-    Full spatial gradient tensor of normalized magnetization m.
-
-    Input:
-        spin_batch: (B, 3*L, Nx, Ny)
-
-    Output:
-        grad: (B, 3, Nx, Ny, L, 3)
-
-    The last dimension is:
-        [d/dx, d/dy, d/dz]
-
-    For a bilayer (L=2), d/dz is necessarily one-sided because there
-    are only two z samples. For L=1, d/dz is returned as zero.
-    """
-    spin_5d = _temporal_spin_to_5d(spin_batch)
-
-    if active_mask is None:
-        active = _active_geometry(spin_5d, active_threshold)
-    else:
-        active = active_mask.bool()
-        expected = (spin_5d.shape[0],
-                    spin_5d.shape[2],
-                    spin_5d.shape[3],
-                    spin_5d.shape[4],)
-        if tuple(active.shape) != expected:
-            raise ValueError(f"active_mask must have shape {expected}, "
-                             f"but received {tuple(active.shape)}.")
-
-    dm_dx = _masked_first_derivative(spin_5d, active, dim=2, spacing=dx)
-    dm_dy = _masked_first_derivative(spin_5d, active, dim=3, spacing=dy)
-
-    if spin_5d.shape[4] > 1:
-        dm_dz = _masked_first_derivative(spin_5d, active, dim=4, spacing=dz)
-    else:
-        dm_dz = torch.zeros_like(spin_5d)
-
-    return torch.stack((dm_dx, dm_dy, dm_dz), dim=-1)
-
-
-def magnetization_gradient_rate(current_spin, previous_spin, dt=1.0, dx=1.0, dy=1.0, dz=1.0, active_threshold=1.0e-12,):
-    r"""
-    Backward finite-difference rate of the FULL magnetization-gradient tensor.
-
-        || [grad(m_t) - grad(m_{t-1})] / dt ||_F
-
-    The Frobenius norm is taken over:
-        magnetization component (mx,my,mz),
-        layer,
-        spatial derivative direction (x,y,z).
-
-    Returns:
-        (B, Nx, Ny), suitable for the existing
-        weight = 1 + alpha * abs(wd)
-        training pattern.
-    """
-    if dt <= 0:
-        raise ValueError("dt must be positive.")
-    if current_spin.shape != previous_spin.shape:
-        raise ValueError("current_spin and previous_spin must have identical shapes.")
-
-    current_5d = _temporal_spin_to_5d(current_spin)
-    previous_5d = _temporal_spin_to_5d(previous_spin)
-
-    active_current = _active_geometry(current_5d, active_threshold)
-    active_previous = _active_geometry(previous_5d, active_threshold)
-
-    if not torch.equal(active_current, active_previous):
-        raise ValueError("Current and previous states do not have the same magnetic "
-                         "geometry. Their samples may be misaligned.")
-
-    grad_current = magnetization_gradient_tensor(current_spin, dx, dy, dz, active_current, active_threshold)
-    grad_previous = magnetization_gradient_tensor(previous_spin, dx, dy, dz, active_current, active_threshold)
-
-    grad_rate = (grad_current - grad_previous) / dt
-
-    # grad_rate shape: (B, 3, Nx, Ny, L, 3)
-    return torch.sqrt(torch.sum(grad_rate.square(), dim=(1, 4, 5)))
-
-
-def magnetization_difference_gradient_rate(current_spin, previous_spin, dt=1.0, dx=1.0, dy=1.0, dz=1.0, active_threshold=1.0e-12,):
-    r"""
-    Gradient AFTER temporal subtraction:
-
-        || grad[(m_t - m_{t-1}) / dt] ||_F
-
-    With the same linear finite-difference operator and geometry mask, this is
-    mathematically the same quantity as magnetization_gradient_rate().
-    This function is provided explicitly so the two formulations can be checked.
-    """
-    if dt <= 0:
-        raise ValueError("dt must be positive.")
-    if current_spin.shape != previous_spin.shape:
-        raise ValueError("current_spin and previous_spin must have identical shapes.")
-
-    current_5d = _temporal_spin_to_5d(current_spin)
-    previous_5d = _temporal_spin_to_5d(previous_spin)
-
-    active_current = _active_geometry(current_5d, active_threshold)
-    active_previous = _active_geometry(previous_5d, active_threshold)
-
-    if not torch.equal(active_current, active_previous):
-        raise ValueError(
-            "Current and previous states do not have the same magnetic "
-            "geometry. Their samples may be misaligned."
-        )
-
-    dm_dt = (current_spin - previous_spin) / dt
-
-    grad_dm_dt = magnetization_gradient_tensor(
-        dm_dt,
-        dx=dx,
-        dy=dy,
-        dz=dz,
-        active_mask=active_current,
-        active_threshold=active_threshold,
-    )
-
-    return torch.sqrt(
-        torch.sum(grad_dm_dt.square(), dim=(1, 4, 5))
-    )
-
-
-def magnetization_gradient_magnitude_rate(current_spin, previous_spin, dt=1.0, dx=1.0, dy=1.0, dz=1.0, active_threshold=1.0e-12,):
-    r"""
-    Backward rate of change of the scalar gradient magnitude:
-
-        | ||grad(m_t)||_F - ||grad(m_{t-1})||_F | / dt
-
-    This is genuinely different from magnetization_gradient_rate().
-    It only tracks change in gradient MAGNITUDE and discards changes in the
-    orientation/sign/structure of the gradient tensor.
-
-    Returns:
-        (B, Nx, Ny)
-    """
-    if dt <= 0:
-        raise ValueError("dt must be positive.")
-    if current_spin.shape != previous_spin.shape:
-        raise ValueError("current_spin and previous_spin must have identical shapes.")
-
-    current_5d = _temporal_spin_to_5d(current_spin)
-    previous_5d = _temporal_spin_to_5d(previous_spin)
-
-    active_current = _active_geometry(current_5d, active_threshold)
-    active_previous = _active_geometry(previous_5d, active_threshold)
-
-    if not torch.equal(active_current, active_previous):
-        raise ValueError("Current and previous states do not have the same magnetic "
-                         "geometry. Their samples may be misaligned.")
-
-    grad_current = magnetization_gradient_tensor(current_spin, dx, dy, dz, active_current, active_threshold)
-    grad_previous = magnetization_gradient_tensor(previous_spin, dx, dy, dz, active_current, active_threshold)
-
-    grad_mag_current = torch.sqrt(torch.sum(grad_current.square(), dim=(1, 4, 5)))
-    grad_mag_previous = torch.sqrt(torch.sum(grad_previous.square(), dim=(1, 4, 5)))
-
-    return torch.abs(grad_mag_current - grad_mag_previous) / dt
-
-
-def dataug_temporal(x, y, x_prev, x_next=None):
-    """
-    Temporal-safe version of the repository's data augmentation.
-
-    The SAME randomly chosen symmetry is applied to current m, target Hd,
-    previous m, and (optionally) next m. This is essential: applying different
-    transforms to neighboring states would corrupt the temporal finite difference.
-
-    Assumes tensor_rotate() and random are already available in utils.py.
-    """
-    symtype = ['R90', 'R180', 'R270', 'RX', 'RY']
-    selected_symmetry = random.choice(symtype)
-    n = x.shape[0] // 10
-
-    if n == 0:
-        if x_next is None:
-            return x, y, x_prev
-        return x, y, x_prev, x_next
-
-    def augment_first_n(tensor):
-        if tensor.shape[1] % 3 != 0:
-            raise ValueError("Channel count must be divisible by 3.")
-
-        transformed_layers = []
-        for start in range(0, tensor.shape[1], 3):
-            transformed_layers.append(
-                tensor_rotate(
-                    tensor[:n, start:start + 3, :, :],
-                    symtype=selected_symmetry,
-                )
-            )
-        transformed = torch.cat(transformed_layers, dim=1)
-        return torch.cat((tensor, transformed), dim=0)
-
-    x_aug = augment_first_n(x)
-    y_aug = augment_first_n(y)
-    prev_aug = augment_first_n(x_prev)
-
-    if x_next is None:
-        return x_aug, y_aug, prev_aug
-
-    next_aug = augment_first_n(x_next)
-    return x_aug, y_aug, prev_aug, next_aug
-
-"""
-Temporal physics-weight utilities for NeuralMAG.
-
-Paste these functions into the training utils.py (or import this module from it).
-
-Expected NeuralMAG tensor layout:
-    (B, 3*L, Nx, Ny)
-
-with channel order:
-    [L0_mx, L0_my, L0_mz, L1_mx, L1_my, L1_mz, ...]
-
-All rate functions below use CURRENT minus PREVIOUS:
-    q_t - q_(t-1)
-
-By default dt=1.0, so the result is "per saved LLG step". This is usually the
-best form for a weighted loss because the common physical dt can be absorbed
-into alpha. Pass dt=1e-13 if you explicitly want per-second rates.
-"""
-
-import random
-import numpy as np
-import torch
-
 
 # ---------------------------------------------------------------------------
 # Tensor layout helpers
 # ---------------------------------------------------------------------------
-
 def _nm_channels_to_grid(spin_batch):
     """
     (B, 3*L, Nx, Ny) -> (B, Nx, Ny, L, 3)
     """
     if spin_batch.ndim != 4:
-        raise ValueError(
-            "Expected spin tensor shape (B, 3*layers, Nx, Ny), "
-            f"got {tuple(spin_batch.shape)}."
-        )
+        raise ValueError("Expected spin tensor shape (B, 3*layers, Nx, Ny), "
+                         f"got {tuple(spin_batch.shape)}.")
 
     batch, channels, nx, ny = spin_batch.shape
     if channels % 3 != 0:
-        raise ValueError(
-            f"Channel count {channels} is not divisible by 3."
-        )
+        raise ValueError(f"Channel count {channels} is not divisible by 3.")
 
     layers = channels // 3
 
-    return (
-        spin_batch.reshape(batch, layers, 3, nx, ny)
-        .permute(0, 3, 4, 1, 2)
-        .contiguous()
-    )
+    return (spin_batch.reshape(batch, layers, 3, nx, ny).permute(0, 3, 4, 1, 2).contiguous())
 
 
 def _nm_grid_to_channels(grid):
@@ -804,25 +285,18 @@ def _nm_grid_to_channels(grid):
     (B, Nx, Ny, L, 3) -> (B, 3*L, Nx, Ny)
     """
     if grid.ndim != 5 or grid.shape[-1] != 3:
-        raise ValueError(
-            "Expected grid tensor shape (B, Nx, Ny, layers, 3)."
-        )
+        raise ValueError("Expected grid tensor shape (B, Nx, Ny, layers, 3).")
 
     b, nx, ny, layers, _ = grid.shape
 
-    return (
-        grid.permute(0, 3, 4, 1, 2)
-        .contiguous()
-        .reshape(b, 3 * layers, nx, ny)
-    )
+    return (grid.permute(0, 3, 4, 1, 2).contiguous().reshape(b, 3 * layers, nx, ny))
 
 
 def _same_shape(current, previous, name="tensor"):
     if current.shape != previous.shape:
         raise ValueError(
             f"Current and previous {name} tensors must have identical shapes; "
-            f"got {tuple(current.shape)} and {tuple(previous.shape)}."
-        )
+            f"got {tuple(current.shape)} and {tuple(previous.shape)}.")
 
 
 def _collapse_vector_layers(vector_grid):
@@ -881,30 +355,53 @@ def _shift_nonperiodic(values, shift, dim, boundary="replicate"):
 
 def _first_derivative_all_cells(values, dim, spacing):
     """
-    Centered derivative in the interior, with one-sided/replicated behavior
-    at the outer rectangular simulation boundary.
-
-    IMPORTANT:
-    Masked cells stored as zero remain part of the numerical field here.
-    This keeps the gradient definition consistent with the actual tensor
-    representation and with the repository-style zero-spin masks.
+    First spatial derivative using centered differences in the interior
+    and true one-sided differences at the outer grid boundaries.
     """
     if spacing <= 0:
         raise ValueError("Spatial spacing must be positive.")
 
-    plus = _shift_nonperiodic(values, shift=-1, dim=dim)
-    minus = _shift_nonperiodic(values, shift=1, dim=dim)
+    if values.shape[dim] < 2:
+        return torch.zeros_like(values)
 
-    return (plus - minus) / (2.0 * spacing)
+    derivative = torch.empty_like(values)
+
+    center = [slice(None)] * values.ndim
+    plus = [slice(None)] * values.ndim
+    minus = [slice(None)] * values.ndim
+
+    center[dim] = slice(1, -1)
+    plus[dim] = slice(2, None)
+    minus[dim] = slice(None, -2)
+
+    if values.shape[dim] > 2:
+        derivative[tuple(center)] = (
+            values[tuple(plus)] - values[tuple(minus)]
+        ) / (2.0 * spacing)
+
+    first = [slice(None)] * values.ndim
+    second = [slice(None)] * values.ndim
+    first[dim] = 0
+    second[dim] = 1
+
+    derivative[tuple(first)] = (
+        values[tuple(second)] - values[tuple(first)]
+    ) / spacing
+
+    last = [slice(None)] * values.ndim
+    before_last = [slice(None)] * values.ndim
+    last[dim] = -1
+    before_last[dim] = -2
+
+    derivative[tuple(last)] = (
+        values[tuple(last)] - values[tuple(before_last)]
+    ) / spacing
+
+    return derivative
 
 
-def magnetization_gradient_tensor_3d(
-    spin_batch,
-    dx=1.0,
-    dy=1.0,
-    dz=1.0,
-):
-    r"""
+def magnetization_gradient_tensor_3d(spin_batch, dx=1.0, dy=1.0, dz=1.0,):
+    """
     Full spatial gradient tensor grad(m) for both magnetic layers.
 
     Input:
@@ -941,21 +438,14 @@ def magnetization_gradient_tensor_3d(
     return torch.stack((dm_dx, dm_dy, dm_dz), dim=-1)
 
 
-def magnetization_gradient_magnitude_3d(
-    spin_batch,
-    dx=1.0,
-    dy=1.0,
-    dz=1.0,
-):
+def magnetization_gradient_magnitude_3d(spin_batch, dx=1.0, dy=1.0, dz=1.0):
     r"""
     Full bilayer Frobenius magnitude ||grad(m)||_F at each x-y location.
 
     Returns:
         (B, Nx, Ny)
     """
-    grad = magnetization_gradient_tensor_3d(
-        spin_batch, dx=dx, dy=dy, dz=dz
-    )
+    grad = magnetization_gradient_tensor_3d(spin_batch, dx=dx, dy=dy, dz=dz)
 
     # sum over layer, m component, derivative direction
     return torch.sqrt(torch.sum(grad.square(), dim=(3, 4, 5)))
@@ -1458,3 +948,31 @@ def dataug_temporal_physics(
 
     return tuple(_augment_one(t) for t in tensors)
 
+
+def gradient_magnitude(spin_batch, dx=1.0, dy=1.0, dz=1.0):
+    """
+    Full bilayer magnetization-gradient magnitude.
+
+    Input:
+        spin_batch: (B, 3*layers, Nx, Ny)
+
+    Returns:
+        (B, Nx, Ny)
+    """
+
+    grad = magnetization_gradient_tensor_3d(
+        spin_batch,
+        dx=dx,
+        dy=dy,
+        dz=dz,
+    )
+
+    # grad:
+    # (B, Nx, Ny, layers, m_component, spatial_direction)
+
+    return torch.sqrt(
+        torch.sum(
+            grad ** 2,
+            dim=(3, 4, 5)
+        )
+    )

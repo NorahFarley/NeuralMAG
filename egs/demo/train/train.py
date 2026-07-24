@@ -13,8 +13,18 @@ import torch
 import torch.optim as optimizer
 
 from Unet import UNet
-from data_load import dataset_prepare
+from data_load import (dataset_prepare, dataset_prepare_temporal_physics,)
 from .utils import *
+
+RATE_LOSS_TYPES = {
+    "gradient_mag_rate",
+    "gradient_tensor_rate",
+    "exch_field_rate",
+    "exch_torque_rate",
+    "exch_e_density_rate",
+    "demag_torque_rate",
+    "demag_field_rate",
+    "winding_density_rate"}
 
 
 def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_dataloader3):
@@ -27,26 +37,61 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
     Loss31 = AverageMeter()
     Loss32 = AverageMeter()
 
-    total_samples = len(train_dataloader1.dataset)
-    processed_samples = 0
+    total_batches = min(len(train_dataloader1), len(train_dataloader2), len(train_dataloader3))
+    use_temporal_data = (args.loss_type in RATE_LOSS_TYPES)
 
     #strat to train
     for batch_idx, (batch1, batch2, batch3) in enumerate(zip(train_dataloader1, train_dataloader2, train_dataloader3)):
-        x1, y1 = batch1
-        x2, y2 = batch2
-        x3, y3 = batch3
-        x1, y1, x2, y2, x3, y3 = x1.to(device), y1.to(device), x2.to(device), y2.to(device), x3.to(device), y3.to(device)  
-        
-        if args.dataug==True:
-            x1, y1 = dataug(x1,y1)
-            x2, y2 = dataug(x2,y2)
-            x3, y3 = dataug(x3,y3)
+
+        if use_temporal_data:
+            x1, y1, x1_prev, y1_prev = batch1
+            x2, y2, x2_prev, y2_prev = batch2
+            x3, y3, x3_prev, y3_prev = batch3 
+
+            x1 = x1.to(device)
+            y1 = y1.to(device)
+            x1_prev = x1_prev.to(device)
+            y1_prev = y1_prev.to(device)
+
+            x2 = x2.to(device)
+            y2 = y2.to(device)
+            x2_prev = x2_prev.to(device)
+            y2_prev = y2_prev.to(device)
+
+            x3 = x3.to(device)
+            y3 = y3.to(device)
+            x3_prev = x3_prev.to(device)
+            y3_prev = y3_prev.to(device)  
+
+            if args.dataug:
+                x1, y1, x1_prev, y1_prev = dataug_temporal_physics(x1, y1, x1_prev, y1_prev)
+                x2, y2, x2_prev, y2_prev = dataug_temporal_physics(x2, y2, x2_prev, y2_prev)
+                x3, y3, x3_prev, y3_prev = dataug_temporal_physics(x3, y3, x3_prev, y3_prev)            
+
+        else:      
+            x1, y1 = batch1
+            x2, y2 = batch2
+            x3, y3 = batch3
+
+            x1 = x1.to(device)
+            y1 = y1.to(device)
+
+            x2 = x2.to(device)
+            y2 = y2.to(device)
+
+            x3 = x3.to(device)
+            y3 = y3.to(device)
+
+            if args.dataug==True:
+                x1, y1 = dataug(x1,y1)
+                x2, y2 = dataug(x2,y2)
+                x3, y3 = dataug(x3,y3) 
 
         mask1, mask2, mask3 = create_mask(x1), create_mask(x2), create_mask(x3)
 
         alpha = args.alpha
 
-        if args.loss_type == "baseline":
+        if args.loss_type in ("baseline", "torque_mismatch"):
             weight1 = 1
             weight2 = 1
             weight3 = 1   
@@ -100,12 +145,12 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
         elif args.loss_type == "demag_torque_rate":
             wd1 = demag_torque_rate(x1, x1_prev, y1, y1_prev)
             wd2 = demag_torque_rate(x2, x2_prev, y2, y2_prev)
-            wd3 = demag_torque_rate(x3, x3_prev, y3, y4_prev)
+            wd3 = demag_torque_rate(x3, x3_prev, y3, y3_prev)
 
         elif args.loss_type == "demag_field_rate":
             wd1 = demag_field_rate(y1, y1_prev)
-            wd2 = demag_field_rate(x2, x2_prev)
-            wd3 = demag_field_rate(x3, x3_prev)
+            wd2 = demag_field_rate(y2, y2_prev)
+            wd3 = demag_field_rate(y3, y3_prev)
 
         elif args.loss_type == "winding_density_rate":
             wd1 = winding_density_rate(x1, x1_prev)
@@ -115,7 +160,7 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
         else:
             raise ValueError(f"Unknown loss_type: {args.loss_type}")
 
-        if args.loss_type != "baseline":
+        if args.loss_type not in ("baseline", "torque_mismatch"):
             wd1 = wd1.unsqueeze(1)
             wd2 = wd2.unsqueeze(1)
             wd3 = wd3.unsqueeze(1)
@@ -147,8 +192,7 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
                                     "std": wd3.std().item(),
                                     "abs_mean": torch.abs(wd3).mean().item(),
                                     "abs_max": torch.abs(wd3).max().item(),
-                                    "p99": torch.quantile(torch.abs(wd3).flatten(),0.99).item()}
-                            }
+                                    "p99": torch.quantile(torch.abs(wd3).flatten(),0.99).item()}}
 
                 file_path = os.path.join(ex_path, f"{args.loss_type}_stats.json")
 
@@ -160,24 +204,43 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
 
         #data1 size32
         pred_y1 = model(x1)
-        loss11 = mse( ISLA(pred_y1), y1 )*mask1 * weight1 #enlarge-scale predict Hd to label Hd 
-        loss12 = mse( pred_y1, SLA(y1) )*mask1  * weight1 #shrink-scale label Hd to predict Hd
-        loss1 = ( (loss11 + 1000*loss12) ).mean()
+        loss11 = mse( ISLA(pred_y1), y1 ) * mask1 * weight1 #enlarge-scale predict Hd to label Hd 
+        loss12 = mse( pred_y1, SLA(y1) ) * mask1  * weight1 #shrink-scale label Hd to predict Hd
+        loss1 = ((loss11 + 1000 * loss12)).mean()
 
         #data2 size64
         pred_y2 = model(x2)
-        loss21 = mse(ISLA(pred_y2), y2)*mask2 * weight2
-        loss22 = mse(pred_y2, SLA(y2))*mask2 * weight2
-        loss2 = ( (loss21 + 1000*loss22) ).mean()
+        loss21 = mse(ISLA(pred_y2), y2) * mask2 * weight2
+        loss22 = mse(pred_y2, SLA(y2)) * mask2 * weight2
+        loss2 = ((loss21 + 1000 * loss22)).mean()
         
         #data3 size96
         pred_y3 = model(x3)
-        loss31 = mse(ISLA(pred_y3), y3)*mask3 * weight3
-        loss32 = mse(pred_y3, SLA(y3))*mask3 * weight3
-        loss3 = ( (loss31 + 1000*loss32) ).mean()
+        loss31 = mse(ISLA(pred_y3), y3) * mask3 * weight3
+        loss32 = mse(pred_y3, SLA(y3)) * mask3 * weight3
+        loss3 = ((loss31 + 1000 * loss32)).mean()
+
+        if args.loss_type == "torque_mismatch":
+            torque_loss1 = demag_torque_mismatch_loss(x1, ISLA(pred_y1), y1)
+            torque_loss2 = demag_torque_mismatch_loss(x2, ISLA(pred_y2), y2)
+            torque_loss3 = demag_torque_mismatch_loss(x3, ISLA(pred_y3), y3)
+
+            loss1 = (loss1 + args.torque_lambda * torque_loss1)
+            loss2 = (loss2 + args.torque_lambda * torque_loss2)
+            loss3 = (loss3 + args.torque_lambda * torque_loss3)
+
+            if epoch == 0 and batch_idx == 0:
+                torque_stats = {
+                    "32": torque_loss1.item(),
+                    "64": torque_loss2.item(),
+                    "96": torque_loss3.item(),
+                    "main_loss_32": loss1.item(),
+                    "main_loss_64": loss2.item(),
+                    "main_loss_96": loss3.item()}
+
+                with open(os.path.join(ex_path, "torque_mismatch_stats.json"), "w", encoding="utf-8") as f: json.dump(torque_stats, f, indent=4)
 
         loss = loss1 + loss2 + loss3
-
 
         loss.backward()
         optim.step()
@@ -191,8 +254,7 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
         Loss32.update( loss32.mean().item(),  x3.size(0) )
         Loss.update( ((loss11.mean()+loss21.mean()+loss31.mean())/3).item(),  x1.size(0)+x2.size(0)+x3.size(0) )
 
-        processed_samples += x1.size(0)
-        percentage = (processed_samples / total_samples) * 100
+        percentage = ((batch_idx + 1) / total_batches) * 100
 
         status_text = (
             f"\rTrain: epoch {epoch} [{percentage:3.0f}%] | Loss {Loss.avg:.1f} | "
@@ -221,8 +283,7 @@ def eval(epoch, model, dataloader1, dataloader2, dataloader3, dataloader4):
     Loss3 = AverageMeter()
     Loss4 = AverageMeter()
 
-    total_samples = len(train_dataloader1.dataset)
-    processed_samples = 0
+    total_batches = min(len(dataloader1), len(dataloader2), len(dataloader3), len(dataloader4))
 
     #strat to train
     for batch_idx, (batch1, batch2, batch3, batch4)  in enumerate(zip(dataloader1, dataloader2, dataloader3, dataloader4)):
@@ -258,8 +319,7 @@ def eval(epoch, model, dataloader1, dataloader2, dataloader3, dataloader4):
         Loss4.update( loss4.mean().item(),  x4.size(0) )
         Loss.update( ((loss1.mean()+loss2.mean()+loss3.mean()+loss4.mean())/4).item(), x1.size(0)+x2.size(0)+x3.size(0)+x4.size(0) )
 
-        processed_samples += x1.size(0)
-        percentage = (processed_samples / total_samples) * 100
+        percentage = ((batch_idx + 1) / total_batches) * 100
 
         status_text = f"\rEval: epoch {epoch} [{percentage:3.0f}%] | Loss {Loss.avg:.1f} | Loss1 {Loss1.avg:.1f} | Loss2 {Loss2.avg:.1f} | Loss3 {Loss3.avg:.1f} | Loss4 {Loss4.avg:.1f}"
         sys.stdout.write(status_text)
@@ -281,33 +341,29 @@ if __name__ == '__main__':
 
     # Training settings
     parser = argparse.ArgumentParser(description='Unet micromagnetics')
-    parser.add_argument('--batch-size', type=int,   default=100,    help='input batch size for training (default: 16)')
-    parser.add_argument('--lr',         type=float, default=0.005,  help='learning rate (default: 0.002)')
+    parser.add_argument('--batch-size', type=int,   default=100,    help='input batch size for training (default: 100)')
+    parser.add_argument('--lr',         type=float, default=0.005,  help='learning rate (default: 0.005)')
     parser.add_argument('--epochs',     type=int,   default=1000,   help='number of epochs to train (default: 1000)')
     
     parser.add_argument('--kc',        type=int,    default=16,     help='kernels of first layer (default: 16)')
-    parser.add_argument('--inch',      type=int,    default=6,      help='input channels (default: 3)')
-    parser.add_argument('--cornum',    type=int,    default=1000,   help='core number (default: 10000)')
-    parser.add_argument('--ntest',     type=int,    default=10,     help='test number (default: 1000)')
-    parser.add_argument('--ntrain',    type=int,    default=250,    help='train number (default: 10000)')
+    parser.add_argument('--inch',      type=int,    default=6,      help='input channels (default: 6)')
+    parser.add_argument('--cornum',    type=int,    default=1000,   help='core number (default: 1000)')
+    parser.add_argument('--ntest',     type=int,    default=20,     help='test number (default: 20)')
+    parser.add_argument('--ntrain',    type=int,    default=300,    help='train number (default: 300)')
 
     parser.add_argument('--gpu',        type=int,   default=0,      help='GPU used (default: 0)')
     parser.add_argument('--ex',         type=float, default=1.0,    help='experiment (default: 0)')
-    parser.add_argument('--dataug',     type=bool,  default=True,   help='data augmentation (default: False)')
+    parser.add_argument('--dataug', action=argparse.BooleanOptionalAction, default=True, help='enable physical symmetry augmentation')    
     parser.add_argument('--alpha',      type=float, default=0.5,    help='weighting coefficient for weighted loss')
     parser.add_argument('--loss_type',  type=str,  default='baseline', help='loss weighting method')
+    parser.add_argument('--torque-lambda', type=float, default=0.1, help='coefficient for torque-mismatch auxiliary loss')
     parser.add_argument('--model',      type=str,  default=None,     help='existing model to continue training')
     args = parser.parse_args()
 
     if torch.cuda.is_available():
         device = torch.device(f"cuda:{args.gpu}")
         print(device, flush=True)
-        print(
-        f"GPU allocated: {torch.cuda.memory_allocated()/1024**3:.2f} GB"
-        )
-        print(
-            f"GPU reserved : {torch.cuda.memory_reserved()/1024**3:.2f} GB"
-        )
+        print(f"GPU reserved : {torch.cuda.memory_reserved()/1024**3:.2f} GB")
         torch.backends.cudnn.benchmark = True
     elif torch.backends.mps.is_available():
         device = torch.device("mps")
@@ -322,6 +378,10 @@ if __name__ == '__main__':
     
     # Model, optimizer, and data loaders initialization
     model = UNet(kc=args.kc, inc=args.inch, ouc=args.inch).to(device)
+    if args.model is not None:
+        model.load_state_dict(torch.load(args.model, map_location=device))
+        print(f"Loaded model: {args.model}", flush=True)
+    
     optim = optimizer.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=0.0001)
 
     # #load data
@@ -329,33 +389,33 @@ if __name__ == '__main__':
     # data_path12 = '../../../utils/Dataset/data_Hd32_Hext100_mask'
     # data_path13 = '../../../utils/Dataset/data_Hd32_Hext0'
 
-    data_path11 = '../../../utils/Dataset/data_Hd32_mask'
-    data_path12 = '../../../utils/Dataset/data_Hd32_mask2'
-    data_path13 = '../../../utils/Dataset/data_Hd32_no_mask'
+    data_path11 = '../../../utils/Dataset/rate_change/w32/masked1'
+    data_path12 = '../../../utils/Dataset/rate_change/w32/masked2'
+    data_path13 = '../../../utils/Dataset/rate_change/w32/unmasked'
 
     # data_path21 = '../../../utils/Dataset/data_Hd64_Hext1000_mask'
     # data_path22 = '../../../utils/Dataset/data_Hd64_Hext100_mask'
     # data_path23 = '../../../utils/Dataset/data_Hd64_Hext0'
 
-    data_path21 = '../../../utils/Dataset/data_Hd64_mask'
-    data_path22 = '../../../utils/Dataset/data_Hd64_mask2'
-    data_path23 = '../../../utils/Dataset/data_Hd64_no_mask'
+    data_path21 = '../../../utils/Dataset/rate_change/w64/masked1'
+    data_path22 = '../../../utils/Dataset/rate_change/w64/masked2'
+    data_path23 = '../../../utils/Dataset/rate_change/w64/unmasked'
 
     # data_path31 = '../../../utils/Dataset/data_Hd96_Hext1000_mask'
     # data_path32 = '../../../utils/Dataset/data_Hd96_Hext100_mask'
     # data_path33 = '../../../utils/Dataset/data_Hd96_Hext0'
 
-    data_path31 = '../../../utils/Dataset/data_Hd96_mask'
-    data_path32 = '../../../utils/Dataset/data_Hd96_mask2'
-    data_path33 = '../../../utils/Dataset/data_Hd96_no_mask'
+    data_path31 = '../../../utils/Dataset/rate_change/w96/masked1'
+    data_path32 = '../../../utils/Dataset/rate_change/w96/masked2'
+    data_path33 = '../../../utils/Dataset/rate_change/w96/unmasked'
 
     # data_path41 = '../../../utils/Dataset/data_Hd128_Hext1000_mask'
     # data_path42 = '../../../utils/Dataset/data_Hd128_Hext100_mask'
     # data_path43 = '../../../utils/Dataset/data_Hd128_Hext0'
 
-    data_path41 = '../../../utils/Dataset/data_Hd128_Hext0'
-    data_path42 = '../../../utils/Dataset/data_Hd128_Hext0'
-    data_path43 = '../../../utils/Dataset/data_Hd128_Hext0'
+    data_path41 = '../../../utils/Dataset/rate_change/w128/masked1'
+    data_path42 = '../../../utils/Dataset/rate_change/w128/masked2'
+    data_path43 = '../../../utils/Dataset/rate_change/w128/unmasked'
     
     data_path1 = [data_path11, data_path12, data_path13]
     data_path2 = [data_path21, data_path22, data_path23]
@@ -364,11 +424,13 @@ if __name__ == '__main__':
 
     print("Creating datasets", flush=True)
 
-    train_dataset1, test_dataset1 = dataset_prepare(data_path1, ntest=args.ntest, n128=args.ntest, ntrain=args.ntrain, cn=args.cornum)
-    train_dataset2, test_dataset2 = dataset_prepare(data_path2, ntest=args.ntest, n128=args.ntest, ntrain=args.ntrain, cn=args.cornum)
-    train_dataset3, test_dataset3 = dataset_prepare(data_path3, ntest=args.ntest, n128=args.ntest, ntrain=args.ntrain, cn=args.cornum)
-    test_dataset4 = dataset_prepare(data_path4, ntest=0, n128=args.ntest, ntrain=0, cn=args.cornum, mode='eval128')
+    use_temporal_data = (args.loss_type in RATE_LOSS_TYPES)
+    train_dataset1, test_dataset1 = dataset_prepare_temporal_physics(data_path1, ntest=args.ntest, ntrain=args.ntrain, cn=args.cornum, include_previous_train=use_temporal_data)
+    train_dataset2, test_dataset2 = dataset_prepare_temporal_physics(data_path2, ntest=args.ntest, ntrain=args.ntrain, cn=args.cornum, include_previous_train=use_temporal_data)
+    train_dataset3, test_dataset3 = dataset_prepare_temporal_physics(data_path3, ntest=args.ntest, ntrain=args.ntrain, cn=args.cornum, include_previous_train=use_temporal_data)
 
+    # 128 is evaluation-only for every loss type
+    test_dataset4 = dataset_prepare(data_path4, ntest=0, n128=args.ntest, ntrain=0, cn=args.cornum, mode='eval128')
 
     bsz1=args.batch_size
     print('samples 1 2 3:',len(train_dataset1), len(train_dataset2), len(train_dataset3))
@@ -435,7 +497,7 @@ if __name__ == '__main__':
         loss_test_list4.append(loss_test4)
 
         #model save path
-        model_path = os.path.join(ex_path, "/ckpt/")
+        model_path = os.path.join(ex_path, "ckpt")
         os.makedirs(model_path, exist_ok=True)
 
         #save best model checkpoint
@@ -458,7 +520,7 @@ if __name__ == '__main__':
         plt.xlabel('epoch')
         plt.ylabel('loss-log')
         plt.yscale('log')  # set y-axis scale to logarithmic
-        plt.savefig(os.path.join(ex_path, '/loss_ex{}.png'.format(args.ex)))
+        plt.savefig(os.path.join(ex_path, 'loss_ex{}.png'.format(args.ex)))
 
     elapsed = time.time() - start_time
 
@@ -479,7 +541,7 @@ if __name__ == '__main__':
                        "best_validation_loss": best_loss,
                        "training_time_seconds": elapsed}
 
-    with open(os.path.join(ex_path, "/experiment.json"), "w") as f:
+    with open(os.path.join(ex_path, "experiment.json"), "w") as f:
         json.dump(experiment_info, f, indent=4)  
 
     print_memory("Memory usage after training: ")
