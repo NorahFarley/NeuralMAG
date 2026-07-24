@@ -118,3 +118,234 @@ def dataset_prepare(data_paths, ntest, n128, ntrain, cn, mode=None):
         test_dataset  = torch.utils.data.TensorDataset(X_test_tensor, y_test_tensor)
         return train_dataset, test_dataset
 
+    """
+Add these functions to data_load.py.
+
+They leave the existing loader untouched and add a temporal loader for datasets
+containing:
+    Spins.npy
+    Hds.npy
+    Spins_prev.npy
+
+Training TensorDataset items are returned as:
+    (current_spin, current_hd, previous_spin)
+
+Validation/test TensorDataset items remain:
+    (current_spin, current_hd)
+
+so the existing eval() loop does not need to be changed.
+"""
+
+import os
+import random
+import numpy as np
+import torch
+
+
+def get_case_paths_temporal(paths):
+    """
+    Recursively find temporal training cases.
+
+    Recursive walking is intentional because the new generator stores cases under:
+        wXX/masked/seedXXXXXX/
+        wXX/unmasked/seedXXXXXX/
+    """
+    cases = []
+
+    for root, _, files in os.walk(paths):
+        required = {'Spins.npy', 'Hds.npy', 'Spins_prev.npy'}
+        if required.issubset(files):
+            cases.append(
+                (
+                    os.path.join(root, 'Spins.npy'),
+                    os.path.join(root, 'Hds.npy'),
+                    os.path.join(root, 'Spins_prev.npy'),
+                )
+            )
+
+    cases.sort()
+    return cases
+
+
+def path_split_temporal(paths, ntest, n128, ntrain, mode=None):
+    """
+    Split complete (current, Hd, previous) cases together so temporal alignment
+    cannot be broken by shuffling.
+    """
+    cases = []
+
+    for path in paths:
+        cases.extend(get_case_paths_temporal(path))
+
+    if not cases:
+        raise FileNotFoundError(
+            "No temporal cases were found. Each seed directory must contain "
+            "Spins.npy, Hds.npy, and Spins_prev.npy."
+        )
+
+    random.seed(123)
+    random.shuffle(cases)
+
+    if mode == 'eval128':
+        selected = cases[:n128]
+        print("test seed number:", len(selected))
+        return selected
+
+    train_cases = cases[ntest:ntrain]
+    test_cases = cases[:ntest]
+
+    print("train seed number:", len(train_cases))
+    print("test seed number:", len(test_cases))
+
+    return train_cases, test_cases
+
+
+def _load_temporal_cases(cases, cn, include_previous):
+    """
+    Load aligned center/target/previous samples.
+
+    The exact same per-trajectory random indices and any winding-number filter
+    are applied to all temporal arrays.
+    """
+    rng = np.random.RandomState(123)
+
+    selected_x = []
+    selected_y = []
+    selected_prev = []
+    total_selected_before_core_filter = 0
+
+    for x_path, y_path, prev_path in cases:
+        x_array = np.load(x_path, mmap_mode='r').transpose((0, 3, 1, 2))
+        y_array = np.load(y_path, mmap_mode='r').transpose((0, 3, 1, 2))
+        prev_array = np.load(prev_path, mmap_mode='r').transpose((0, 3, 1, 2))
+
+        if not (
+            x_array.shape[0] == y_array.shape[0] == prev_array.shape[0]
+        ):
+            raise ValueError(
+                "Temporal arrays have different sample counts in:\n"
+                f"  {os.path.dirname(x_path)}"
+            )
+
+        if x_array.shape != prev_array.shape:
+            raise ValueError(
+                "Spins.npy and Spins_prev.npy have different shapes in:\n"
+                f"  {os.path.dirname(x_path)}"
+            )
+
+        if x_array.shape[0] < 500:
+            raise ValueError(
+                f"{x_path} contains only {x_array.shape[0]} samples; "
+                "the current NeuralMAG training pipeline expects 500."
+            )
+
+        # Same behavior as the existing loader: choose 500 samples per case.
+        indices = rng.choice(x_array.shape[0], 500, replace=False)
+
+        x_array = np.asarray(x_array[indices])
+        y_array = np.asarray(y_array[indices])
+        prev_array = np.asarray(prev_array[indices])
+
+        total_selected_before_core_filter += x_array.shape[0]
+
+        if cn < 1000:
+            _, winding_abs = winding_density(x_array)
+            core_indices = np.where(
+                (0 <= winding_abs) & (winding_abs <= cn)
+            )
+
+            x_array = x_array[core_indices]
+            y_array = y_array[core_indices]
+            prev_array = prev_array[core_indices]
+
+        selected_x.append(x_array)
+        selected_y.append(y_array)
+
+        if include_previous:
+            selected_prev.append(prev_array)
+
+    x = np.concatenate(selected_x, axis=0)
+    y = np.concatenate(selected_y, axis=0)
+
+    print(
+        '0<= core number <={}, selected_percent: {:.2f}'.format(
+            cn,
+            x.shape[0] / total_selected_before_core_filter,
+        )
+    )
+    print('selected x y shape: ', x.shape, y.shape, '\n')
+
+    if not include_previous:
+        return x, y
+
+    prev = np.concatenate(selected_prev, axis=0)
+    print('selected previous-spin shape: ', prev.shape, '\n')
+
+    return x, y, prev
+
+
+def getdata_temporal(paths, ntest, n128, ntrain, cn, mode=None):
+    if mode == 'eval128':
+        test_cases = path_split_temporal(
+            paths, ntest, n128, ntrain, mode='eval128'
+        )
+        x_test, y_test = _load_temporal_cases(
+            test_cases, cn, include_previous=False
+        )
+        return x_test, y_test
+
+    train_cases, test_cases = path_split_temporal(
+        paths, ntest, n128, ntrain
+    )
+
+    x_train, y_train, x_prev_train = _load_temporal_cases(
+        train_cases, cn, include_previous=True
+    )
+    x_test, y_test = _load_temporal_cases(
+        test_cases, cn, include_previous=False
+    )
+
+    return x_train, y_train, x_prev_train, x_test, y_test
+
+
+def dataset_prepare_temporal(
+    data_paths,
+    ntest,
+    n128,
+    ntrain,
+    cn,
+    mode=None,
+):
+    """
+    Temporal counterpart of dataset_prepare().
+
+    Training samples:
+        (m_t, Hd_t, m_{t-1})
+
+    Test samples:
+        (m_t, Hd_t)
+
+    This keeps the existing evaluation code compatible.
+    """
+    print('loading temporal data from: ', data_paths)
+
+    if mode == 'eval128':
+        x_test, y_test = getdata_temporal(
+            data_paths, ntest, n128, ntrain, cn, mode='eval128'
+        )
+
+        return torch.utils.data.TensorDataset(
+            torch.from_numpy(x_test).float(),
+            torch.from_numpy(y_test).float(),
+        )
+
+    (x_train, y_train, x_prev_train, x_test, y_test,) = getdata_temporal(data_paths, ntest, n128, ntrain, cn)
+
+    train_dataset = torch.utils.data.TensorDataset(torch.from_numpy(x_train).float(), torch.from_numpy(y_train).float(), torch.from_numpy(x_prev_train).float(),)
+
+    test_dataset = torch.utils.data.TensorDataset(torch.from_numpy(x_test).float(), torch.from_numpy(y_test).float(),)
+
+    return train_dataset, test_dataset
+
+
+
