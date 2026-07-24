@@ -70,16 +70,8 @@ def validate_generation_request(args: argparse.Namespace) -> None:
 
 
 def prepare_model(args: argparse.Namespace):
-    film = MAG2305.mmModel(
-        types='bulk',
-        size=(args.w, args.w, args.layers),
-        cell=(3,3,3),
-        Ms=args.Ms,
-        Ax=args.Ax,
-        Ku=args.Ku,
-        Kvec=args.Kvec,
-        device=f'cuda:{args.gpu}',
-    )
+    film = MAG2305.mmModel(types='bulk', size=(args.w, args.w, args.layers), cell=(3,3,3), Ms=args.Ms, Ax=args.Ax, 
+                           Ku=args.Ku, Kvec=args.Kvec, device=f'cuda:{args.gpu}',)
 
     print(f'Creating {args.layers}-layer model')
     print(f'Convergence threshold: {args.error_min:.3e}')
