@@ -49,7 +49,7 @@ def generate_data(args, film):
 
         spin = initial_spin_prepare(args.w, args.layers, seed)
         if args.mask == 'True':
-            mask = create_random_mask((args.w, args.w), np.random.randint(2, args.w), random.choice([True, False]))
+            mask = create_random_mask(shape=(args.w, args.w), num_points=np.random.randint(2, args.w),fixshape=False,)
             spin = film.SpinInit(spin * mask)
         else:
             spin = film.SpinInit(spin)
