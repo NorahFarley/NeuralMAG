@@ -14,7 +14,7 @@ python ./train.py --batch-size 100 \
                 --ntrain 300 \
                 --ntest 20 \
                 --gpu 0 \
-                --ex 1.0 \
+                --ex 3.0 \
                 --alpha $ALPHA \
                 --loss_type $LOSS_TYPE \
                 --torque-lambda $TORQUE_LAMBDA
