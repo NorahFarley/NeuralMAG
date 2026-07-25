@@ -453,7 +453,7 @@ if __name__ == '__main__':
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     #experiment path
-    ex_path = os.path.join(f"./{args.loss_type}_contin",
+    ex_path = os.path.join(f"./{args.loss_type}",
                            f"{timestamp}_ex{args.ex}_bsz{bsz1}_lr{args.lr}_Unet_kc{args.kc}_inch{args.inch}",)
     os.makedirs(ex_path, exist_ok=True)
 
