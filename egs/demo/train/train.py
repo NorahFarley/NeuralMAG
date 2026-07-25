@@ -20,7 +20,7 @@ RATE_LOSS_TYPES = {
     "gradient_mag_rate",
     "gradient_tensor_rate",
     "exchange_field_rate",
-    "exchchange_torque_rate",
+    "exchange_torque_rate",
     "exchange_energy_density_rate",
     "demag_torque_rate",
     "demag_field_rate",
