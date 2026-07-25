@@ -435,6 +435,8 @@ if __name__ == "__main__":
         include_previous_train=use_temporal_data,
     )
 
+    print_memory(msg="Memory used after preparing datasets")
+
     print(
         f"size-64 samples: train={len(train_dataset64)}, "
         f"test={len(test_dataset64)}",
@@ -524,6 +526,9 @@ if __name__ == "__main__":
             model,
             test_dataloader64,
         )
+
+        if epoch % 100 ==0:
+            print_memory(msg=f"Memory used after training epoch number: {epoch}")
 
         logging.info(
             "Evaluate loss64: {:.1f}".format(loss_test64)

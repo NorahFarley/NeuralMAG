@@ -432,6 +432,8 @@ if __name__ == '__main__':
     # 128 is evaluation-only for every loss type
     test_dataset4 = dataset_prepare(data_path4, ntest=0, n128=args.ntest, ntrain=0, cn=args.cornum, mode='eval128')
 
+    print_memory(msg="Memory used after preparing datasets")
+
     bsz1=args.batch_size
     print('samples 1 2 3:',len(train_dataset1), len(train_dataset2), len(train_dataset3))
     bsz2=round(bsz1 / (len(train_dataset1) / len(train_dataset2)))
@@ -495,6 +497,9 @@ if __name__ == '__main__':
         loss_test_list2.append(loss_test2)
         loss_test_list3.append(loss_test3)
         loss_test_list4.append(loss_test4)
+
+        if epoch % 100 ==0:
+            print_memory(msg=f"Memory used after training epoch number: {epoch}")
 
         #model save path
         model_path = os.path.join(ex_path, "ckpt")
