@@ -33,9 +33,6 @@ class AverageMeter(object):
         self.avg = self.sum / self.count
 
 
-
-
-
 def tensor2rgb(tensor1, tensor2, tensor3, save_path):
     tensor1 = tensor1.to(torch.float)
     tensor2 = tensor2.to(torch.float)
@@ -52,7 +49,6 @@ def tensor2rgb(tensor1, tensor2, tensor3, save_path):
 
     # 保存为 png 文件
     vutils.save_image(combined_image, save_path, normalize=True)
-
 
 
 def vectorgraph(t1, t2, t3, save_path):
@@ -83,10 +79,6 @@ def vectorgraph(t1, t2, t3, save_path):
     plt.close()
 
 
-
-
-
-
 def create_mask(tensor):
     with torch.no_grad():
         device = tensor.device  # 获取张量所在的设备
@@ -97,8 +89,10 @@ def mse(x, y):
     mse_tensor = torch.square(x-y)
     return mse_tensor
 
+
 def SLA(x):
     return torch.where(x >= 0, torch.log(x+1), -torch.log(-x+1))
+
 
 def ISLA(x):
     return torch.where(x >= 0, torch.exp(x)-1, -torch.exp(-x)+1)
@@ -132,6 +126,7 @@ def winding_density(spin_batch):
 
     return winding_density, torch.round(winding_abs).cpu().numpy()
 
+
 def magnetic_divergence(spin_batch):
     """
     Computes magnetic charge density for a batch of magnetization fields
@@ -160,49 +155,12 @@ def magnetic_divergence(spin_batch):
 
     return charge
 
-def gradient_magnitude(spin_batch):
-    """
-    Computes magnitude of spatial magnetization gradient
-
-    Args:
-        spin_batch: Tensor of shape (batch, 3, H, W)
-
-    Returns:
-        grad_mag: Tensor of shape (batch, H, W)
-    """
-
-    grad_sq = 0.0
-
-    for c in range(3):
-
-        M = spin_batch[:, c]
-
-        M_xp = torch.roll(M, shifts=-1, dims=1)
-        M_xm = torch.roll(M, shifts=1, dims=1)
-
-        M_yp = torch.roll(M, shifts=-1, dims=2)
-        M_ym = torch.roll(M, shifts=1, dims=2)
-
-        # replicate edge values
-        M_xp[:, -1, :] = M[:, -1, :]
-        M_xm[:,  0, :] = M[:,  0, :]
-
-        M_yp[:, :, -1] = M[:, :, -1]
-        M_ym[:, :,  0] = M[:, :,  0]
-
-        dMx = (M_xp - M_xm) / 2
-        dMy = (M_yp - M_ym) / 2
-
-        grad_sq += dMx**2 + dMy**2
-
-    grad_mag = torch.sqrt(grad_sq)
-
-    return grad_mag
 
 def print_memory(msg=""):
     process = psutil.Process(os.getpid())
     mem = process.memory_info().rss / (1024**3)
     print(f"{msg} | RAM: {mem:.2f} GB", flush=True)
+
 
 def tensor_rotate(tensor, symtype=None):
     #spins(bsz,w,h,channel)
@@ -236,7 +194,6 @@ def tensor_rotate(tensor, symtype=None):
         return spinrt270.permute(0,3,1,2)
      
 
-
 def dataug(x,y):
     symtype=['R90', 'R180', 'R270', 'RX', 'RY']    
     selected_symmetry = random.choice(symtype)
@@ -250,7 +207,6 @@ def dataug(x,y):
     x_combine = torch.cat((x, xr), dim=0)
     y_combine = torch.cat((y, yr), dim=0)
     return x_combine, y_combine
-
 
 
 def visualize(mode, epoch, ex_path, x, y, ISLA_y, size):
@@ -275,3 +231,748 @@ def visualize(mode, epoch, ex_path, x, y, ISLA_y, size):
     # Visualize for each layer
     visualize_layer(0, 'L1')
     visualize_layer(3, 'L2')
+
+
+def demag_torque_mismatch_loss(spin_batch, predicted_hd, true_hd, active_threshold=1.0e-12):
+    """
+    Mean squared demagnetizing-torque mismatch over magnetic cells:
+
+        || m x (Hdemag_pred - Hdemag_true) ||^2
+
+    predicted_hd and true_hd must both be in physical Hdemag units.
+    Therefore call this using ISLA(pred_y), NOT pred_y.
+    """
+    _same_shape(spin_batch, predicted_hd, "spin/predicted Hd")
+    _same_shape(spin_batch, true_hd, "spin/true Hd")
+
+    m = _nm_channels_to_grid(spin_batch)
+
+    hd_error = (_nm_channels_to_grid(predicted_hd) - _nm_channels_to_grid(true_hd))
+    torque_error = torch.linalg.cross(m, hd_error, dim=-1)
+    torque_error_sq = torch.sum(torque_error.square(), dim=-1)
+
+    active = (torch.linalg.vector_norm(m, dim=-1) > active_threshold)
+    active_count = active.sum().clamp_min(1)
+
+    return (torque_error_sq * active.to(torque_error_sq.dtype)).sum() / active_count
+
+# ------------------------------------------------------------------------
+# RATE OF CHANGE FUNCTIONS
+# ------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Tensor layout helpers
+# ---------------------------------------------------------------------------
+def _nm_channels_to_grid(spin_batch):
+    """
+    (B, 3*L, Nx, Ny) -> (B, Nx, Ny, L, 3)
+    """
+    if spin_batch.ndim != 4:
+        raise ValueError("Expected spin tensor shape (B, 3*layers, Nx, Ny), "
+                         f"got {tuple(spin_batch.shape)}.")
+
+    batch, channels, nx, ny = spin_batch.shape
+    if channels % 3 != 0:
+        raise ValueError(f"Channel count {channels} is not divisible by 3.")
+
+    layers = channels // 3
+
+    return (spin_batch.reshape(batch, layers, 3, nx, ny).permute(0, 3, 4, 1, 2).contiguous())
+
+
+def _nm_grid_to_channels(grid):
+    """
+    (B, Nx, Ny, L, 3) -> (B, 3*L, Nx, Ny)
+    """
+    if grid.ndim != 5 or grid.shape[-1] != 3:
+        raise ValueError("Expected grid tensor shape (B, Nx, Ny, layers, 3).")
+
+    b, nx, ny, layers, _ = grid.shape
+
+    return (grid.permute(0, 3, 4, 1, 2).contiguous().reshape(b, 3 * layers, nx, ny))
+
+
+def _same_shape(current, previous, name="tensor"):
+    if current.shape != previous.shape:
+        raise ValueError(
+            f"Current and previous {name} tensors must have identical shapes; "
+            f"got {tuple(current.shape)} and {tuple(previous.shape)}.")
+
+
+def _collapse_vector_layers(vector_grid):
+    """
+    Collapse (B, Nx, Ny, L, 3) into one scalar map (B, Nx, Ny)
+    using the Euclidean norm over layer and vector-component axes.
+    """
+    return torch.sqrt(torch.sum(vector_grid.square(), dim=(-1, -2)))
+
+
+def _collapse_scalar_layers_rms(scalar_grid):
+    """
+    Collapse (B, Nx, Ny, L) into (B, Nx, Ny) using RMS over layers.
+    """
+    return torch.sqrt(torch.mean(scalar_grid.square(), dim=-1))
+
+
+# ---------------------------------------------------------------------------
+# Non-periodic spatial finite differences
+# ---------------------------------------------------------------------------
+
+def _shift_nonperiodic(values, shift, dim, boundary="replicate"):
+    """
+    torch.roll with wrapped elements replaced at the physical array boundary.
+
+    boundary='replicate' matches the non-PBC style used by MAG2305 torch_roll
+    at the outer rectangular box.
+    """
+    shifted = torch.roll(values, shifts=shift, dims=dim)
+
+    index = [slice(None)] * values.ndim
+
+    if shift == 1:
+        index[dim] = 0
+        if boundary == "replicate":
+            shifted[tuple(index)] = values[tuple(index)]
+        elif boundary == "zero":
+            shifted[tuple(index)] = 0
+        else:
+            raise ValueError("boundary must be 'replicate' or 'zero'.")
+
+    elif shift == -1:
+        index[dim] = -1
+        if boundary == "replicate":
+            shifted[tuple(index)] = values[tuple(index)]
+        elif boundary == "zero":
+            shifted[tuple(index)] = 0
+        else:
+            raise ValueError("boundary must be 'replicate' or 'zero'.")
+
+    else:
+        raise ValueError("_shift_nonperiodic only supports shift +/-1.")
+
+    return shifted
+
+
+def _first_derivative_all_cells(values, dim, spacing):
+    """
+    First spatial derivative using centered differences in the interior
+    and true one-sided differences at the outer grid boundaries.
+    """
+    if spacing <= 0:
+        raise ValueError("Spatial spacing must be positive.")
+
+    if values.shape[dim] < 2:
+        return torch.zeros_like(values)
+
+    derivative = torch.empty_like(values)
+
+    center = [slice(None)] * values.ndim
+    plus = [slice(None)] * values.ndim
+    minus = [slice(None)] * values.ndim
+
+    center[dim] = slice(1, -1)
+    plus[dim] = slice(2, None)
+    minus[dim] = slice(None, -2)
+
+    if values.shape[dim] > 2:
+        derivative[tuple(center)] = (
+            values[tuple(plus)] - values[tuple(minus)]
+        ) / (2.0 * spacing)
+
+    first = [slice(None)] * values.ndim
+    second = [slice(None)] * values.ndim
+    first[dim] = 0
+    second[dim] = 1
+
+    derivative[tuple(first)] = (
+        values[tuple(second)] - values[tuple(first)]
+    ) / spacing
+
+    last = [slice(None)] * values.ndim
+    before_last = [slice(None)] * values.ndim
+    last[dim] = -1
+    before_last[dim] = -2
+
+    derivative[tuple(last)] = (
+        values[tuple(last)] - values[tuple(before_last)]
+    ) / spacing
+
+    return derivative
+
+
+def magnetization_gradient_tensor_3d(spin_batch, dx=1.0, dy=1.0, dz=1.0,):
+    """
+    Full spatial gradient tensor grad(m) for both magnetic layers.
+
+    Input:
+        spin_batch : (B, 3*L, Nx, Ny)
+
+    Internal representation:
+        m : (B, Nx, Ny, L, 3)
+
+    Output:
+        grad : (B, Nx, Ny, L, 3, 3)
+
+    grad[..., component, derivative_direction]
+    derivative_direction order = (x, y, z)
+
+    For L=2, d/dz is necessarily a two-layer finite difference. There is no
+    centered three-point z stencil because only two z cell centers exist.
+    """
+    m = _nm_channels_to_grid(spin_batch)
+
+    # m dimensions: B, x, y, z(layer), vector-component
+    dm_dx = _first_derivative_all_cells(m, dim=1, spacing=dx)
+    dm_dy = _first_derivative_all_cells(m, dim=2, spacing=dy)
+
+    if m.shape[3] == 1:
+        dm_dz = torch.zeros_like(m)
+    elif m.shape[3] == 2:
+        # With two layers, the physically available first-order derivative
+        # is the difference between the two layer-center values.
+        dz_pair = (m[:, :, :, 1, :] - m[:, :, :, 0, :]) / dz
+        dm_dz = torch.stack((dz_pair, dz_pair), dim=3)
+    else:
+        dm_dz = _first_derivative_all_cells(m, dim=3, spacing=dz)
+
+    return torch.stack((dm_dx, dm_dy, dm_dz), dim=-1)
+
+
+def magnetization_gradient_magnitude_3d(spin_batch, dx=1.0, dy=1.0, dz=1.0):
+    r"""
+    Full bilayer Frobenius magnitude ||grad(m)||_F at each x-y location.
+
+    Returns:
+        (B, Nx, Ny)
+    """
+    grad = magnetization_gradient_tensor_3d(spin_batch, dx=dx, dy=dy, dz=dz)
+
+    # sum over layer, m component, derivative direction
+    return torch.sqrt(torch.sum(grad.square(), dim=(3, 4, 5)))
+
+
+# ---------------------------------------------------------------------------
+# The TWO genuinely different magnetization-gradient rate definitions
+# ---------------------------------------------------------------------------
+
+def gradient_magnitude_rate(
+    current_spin,
+    previous_spin,
+    dt=1.0,
+    dx=1.0,
+    dy=1.0,
+    dz=1.0,
+):
+    r"""
+    Rate of change of the SCALAR gradient magnitude:
+
+        | ||grad(m_t)||_F - ||grad(m_(t-1))||_F | / dt
+
+    This detects changes in how strong the spatial nonuniformity is.
+
+    Returns:
+        (B, Nx, Ny), nonnegative.
+    """
+    _same_shape(current_spin, previous_spin, "spin")
+
+    if dt <= 0:
+        raise ValueError("dt must be positive.")
+
+    g_now = magnetization_gradient_magnitude_3d(
+        current_spin, dx=dx, dy=dy, dz=dz
+    )
+    g_prev = magnetization_gradient_magnitude_3d(
+        previous_spin, dx=dx, dy=dy, dz=dz
+    )
+
+    return torch.abs(g_now - g_prev) / dt
+
+
+def gradient_tensor_rate(
+    current_spin,
+    previous_spin,
+    dt=1.0,
+    dx=1.0,
+    dy=1.0,
+    dz=1.0,
+):
+    r"""
+    Rate of change of the FULL gradient tensor:
+
+        || grad(m_t) - grad(m_(t-1)) ||_F / dt
+
+    This detects changes in gradient direction/tensor structure as well as
+    changes in gradient magnitude.
+
+    Returns:
+        (B, Nx, Ny), nonnegative.
+    """
+    _same_shape(current_spin, previous_spin, "spin")
+
+    if dt <= 0:
+        raise ValueError("dt must be positive.")
+
+    grad_now = magnetization_gradient_tensor_3d(
+        current_spin, dx=dx, dy=dy, dz=dz
+    )
+    grad_prev = magnetization_gradient_tensor_3d(
+        previous_spin, dx=dx, dy=dy, dz=dz
+    )
+
+    delta_grad = (grad_now - grad_prev) / dt
+
+    return torch.sqrt(
+        torch.sum(delta_grad.square(), dim=(3, 4, 5))
+    )
+
+
+def delta_m_gradient_rate(
+    current_spin,
+    previous_spin,
+    dt=1.0,
+    dx=1.0,
+    dy=1.0,
+    dz=1.0,
+):
+    r"""
+    Explicitly calculate:
+
+        || grad[(m_t - m_(t-1))/dt] ||_F
+
+    With the same linear finite-difference operator, this is algebraically
+    equivalent to gradient_tensor_rate(). It is included as a numerical
+    cross-check, not as a separate physics loss candidate.
+    """
+    _same_shape(current_spin, previous_spin, "spin")
+
+    if dt <= 0:
+        raise ValueError("dt must be positive.")
+
+    dm_dt = (current_spin - previous_spin) / dt
+    grad_dm_dt = magnetization_gradient_tensor_3d(
+        dm_dt, dx=dx, dy=dy, dz=dz
+    )
+
+    return torch.sqrt(
+        torch.sum(grad_dm_dt.square(), dim=(3, 4, 5))
+    )
+
+
+# ---------------------------------------------------------------------------
+# Exact repository-style exchange field
+# ---------------------------------------------------------------------------
+
+def exchange_field(
+    spin_batch,
+    Ms=1000.0,
+    Ax=0.5e-6,
+    cell_nm=(3.0, 3.0, 3.0),
+):
+    r"""
+    Reproduce MAG2305's uniform-material Heisenberg exchange field:
+
+        H_ex = sum_neighbors Hx0_neighbor * (m_neighbor - m_center)
+
+    for a finite ('bulk') rectangular box.
+
+    For uniform Ms and Ax, MAG2305's neighbor coefficient reduces to:
+
+        Hx0 = 2 * 1e14 * Ax / (Ms * D^2)   [Oe]
+
+    separately for x, y, z cell sizes.
+
+    The zero-spin masked cells are intentionally NOT removed from this
+    calculation. That matches the current data generator / MAG2305 behavior:
+    the geometry was made by multiplying spin by a zero mask rather than by
+    changing film.model.
+
+    Returns:
+        (B, Nx, Ny, L, 3), exchange field in Oe.
+    """
+    if Ms <= 0:
+        raise ValueError("Ms must be positive.")
+    if Ax < 0:
+        raise ValueError("Ax must be nonnegative.")
+
+    if len(cell_nm) != 3 or any(float(d) <= 0 for d in cell_nm):
+        raise ValueError("cell_nm must contain three positive cell sizes.")
+
+    m = _nm_channels_to_grid(spin_batch)
+
+    coeff_x = 2.0e14 * Ax / (Ms * float(cell_nm[0]) ** 2)
+    coeff_y = 2.0e14 * Ax / (Ms * float(cell_nm[1]) ** 2)
+    coeff_z = 2.0e14 * Ax / (Ms * float(cell_nm[2]) ** 2)
+
+    hx = coeff_x * (
+        (_shift_nonperiodic(m, 1, 1) - m)
+        + (_shift_nonperiodic(m, -1, 1) - m)
+    )
+
+    hy = coeff_y * (
+        (_shift_nonperiodic(m, 1, 2) - m)
+        + (_shift_nonperiodic(m, -1, 2) - m)
+    )
+
+    hz = coeff_z * (
+        (_shift_nonperiodic(m, 1, 3) - m)
+        + (_shift_nonperiodic(m, -1, 3) - m)
+    )
+
+    return hx + hy + hz
+
+
+def exchange_field_rate(
+    current_spin,
+    previous_spin,
+    dt=1.0,
+    Ms=1000.0,
+    Ax=0.5e-6,
+    cell_nm=(3.0, 3.0, 3.0),
+):
+    r"""
+    || H_ex(t) - H_ex(t-1) || / dt
+
+    Norm is over vector components and both layers.
+
+    Returns:
+        (B, Nx, Ny), nonnegative.
+    """
+    _same_shape(current_spin, previous_spin, "spin")
+    if dt <= 0:
+        raise ValueError("dt must be positive.")
+
+    h_now = exchange_field(current_spin, Ms, Ax, cell_nm)
+    h_prev = exchange_field(previous_spin, Ms, Ax, cell_nm)
+
+    return _collapse_vector_layers((h_now - h_prev) / dt)
+
+
+# ---------------------------------------------------------------------------
+# Exchange energy density
+# ---------------------------------------------------------------------------
+
+def exchange_energy_density(
+    spin_batch,
+    Ms=1000.0,
+    Ax=0.5e-6,
+    cell_nm=(3.0, 3.0, 3.0),
+):
+    r"""
+    Local exchange energy density matching MAG2305's detailed-energy form:
+
+        e_ex = -0.5 * Ms * m dot H_ex
+
+    Returns:
+        (B, Nx, Ny, L)
+
+    In cgs units this has the energy-density scale erg/cc.
+    """
+    m = _nm_channels_to_grid(spin_batch)
+    h_ex = exchange_field(spin_batch, Ms, Ax, cell_nm)
+
+    return -0.5 * Ms * torch.sum(m * h_ex, dim=-1)
+
+
+def exchange_energy_density_rate(
+    current_spin,
+    previous_spin,
+    dt=1.0,
+    Ms=1000.0,
+    Ax=0.5e-6,
+    cell_nm=(3.0, 3.0, 3.0),
+):
+    r"""
+    RMS-over-layer rate of change of exchange energy density:
+
+        RMS_layers( [e_ex(t) - e_ex(t-1)] / dt )
+
+    Returns:
+        (B, Nx, Ny), nonnegative.
+    """
+    _same_shape(current_spin, previous_spin, "spin")
+    if dt <= 0:
+        raise ValueError("dt must be positive.")
+
+    e_now = exchange_energy_density(
+        current_spin, Ms=Ms, Ax=Ax, cell_nm=cell_nm
+    )
+    e_prev = exchange_energy_density(
+        previous_spin, Ms=Ms, Ax=Ax, cell_nm=cell_nm
+    )
+
+    return _collapse_scalar_layers_rms((e_now - e_prev) / dt)
+
+
+# ---------------------------------------------------------------------------
+# Demagnetizing-field and torque rates
+# ---------------------------------------------------------------------------
+
+def demag_field_rate(
+    current_hd,
+    previous_hd,
+    dt=1.0,
+):
+    r"""
+    Direct target-field rate:
+
+        || H_d(t) - H_d(t-1) || / dt
+
+    Returns:
+        (B, Nx, Ny), nonnegative.
+    """
+    _same_shape(current_hd, previous_hd, "demag-field")
+    if dt <= 0:
+        raise ValueError("dt must be positive.")
+
+    hd_now = _nm_channels_to_grid(current_hd)
+    hd_prev = _nm_channels_to_grid(previous_hd)
+
+    return _collapse_vector_layers((hd_now - hd_prev) / dt)
+
+
+def demag_torque(
+    spin_batch,
+    hd_batch,
+):
+    r"""
+    Demagnetizing precessional torque proxy:
+
+        tau_d = m x H_d
+
+    Returns:
+        (B, Nx, Ny, L, 3)
+    """
+    _same_shape(spin_batch, hd_batch, "spin/Hd")
+
+    m = _nm_channels_to_grid(spin_batch)
+    hd = _nm_channels_to_grid(hd_batch)
+
+    return torch.linalg.cross(m, hd, dim=-1)
+
+
+def demag_torque_rate(
+    current_spin,
+    previous_spin,
+    current_hd,
+    previous_hd,
+    dt=1.0,
+):
+    r"""
+    || [m_t x H_d,t] - [m_(t-1) x H_d,t-1] || / dt
+
+    Returns:
+        (B, Nx, Ny), nonnegative.
+    """
+    _same_shape(current_spin, previous_spin, "spin")
+    _same_shape(current_hd, previous_hd, "demag-field")
+    _same_shape(current_spin, current_hd, "spin/Hd")
+
+    if dt <= 0:
+        raise ValueError("dt must be positive.")
+
+    tau_now = demag_torque(current_spin, current_hd)
+    tau_prev = demag_torque(previous_spin, previous_hd)
+
+    return _collapse_vector_layers((tau_now - tau_prev) / dt)
+
+
+# ---------------------------------------------------------------------------
+# Exchange torque rate
+# ---------------------------------------------------------------------------
+
+def exchange_torque(
+    spin_batch,
+    Ms=1000.0,
+    Ax=0.5e-6,
+    cell_nm=(3.0, 3.0, 3.0),
+):
+    r"""
+    Exchange precessional torque proxy:
+
+        tau_ex = m x H_ex
+
+    Returns:
+        (B, Nx, Ny, L, 3)
+    """
+    m = _nm_channels_to_grid(spin_batch)
+    h_ex = exchange_field(spin_batch, Ms, Ax, cell_nm)
+
+    return torch.linalg.cross(m, h_ex, dim=-1)
+
+
+def exchange_torque_rate(
+    current_spin,
+    previous_spin,
+    dt=1.0,
+    Ms=1000.0,
+    Ax=0.5e-6,
+    cell_nm=(3.0, 3.0, 3.0),
+):
+    r"""
+    || tau_ex(t) - tau_ex(t-1) || / dt
+
+    Returns:
+        (B, Nx, Ny), nonnegative.
+    """
+    _same_shape(current_spin, previous_spin, "spin")
+    if dt <= 0:
+        raise ValueError("dt must be positive.")
+
+    tau_now = exchange_torque(current_spin, Ms, Ax, cell_nm)
+    tau_prev = exchange_torque(previous_spin, Ms, Ax, cell_nm)
+
+    return _collapse_vector_layers((tau_now - tau_prev) / dt)
+
+
+# ---------------------------------------------------------------------------
+# Winding-density rate (lower-priority ablation)
+# ---------------------------------------------------------------------------
+
+def winding_density_per_layer(spin_batch):
+    r"""
+    Layer-resolved version of the repository's current winding_density formula.
+
+    It intentionally follows the SAME in-plane expression already used by the
+    NeuralMAG training utilities:
+
+        [(d mx/dx)(d my/dy) - (d my/dx)(d mx/dy)] / pi
+
+    This is kept for direct comparability with the user's earlier winding loss.
+    It is not being relabeled as skyrmion/topological-charge density.
+
+    Returns:
+        (B, Nx, Ny, L)
+    """
+    m = _nm_channels_to_grid(spin_batch)
+
+    mx = m[..., 0]
+    my = m[..., 1]
+
+    mx_xp = _shift_nonperiodic(mx, -1, 1)
+    mx_xm = _shift_nonperiodic(mx, 1, 1)
+    my_xp = _shift_nonperiodic(my, -1, 1)
+    my_xm = _shift_nonperiodic(my, 1, 1)
+
+    mx_yp = _shift_nonperiodic(mx, -1, 2)
+    mx_ym = _shift_nonperiodic(mx, 1, 2)
+    my_yp = _shift_nonperiodic(my, -1, 2)
+    my_ym = _shift_nonperiodic(my, 1, 2)
+
+    dmx_dx = (mx_xp - mx_xm) / 2.0
+    dmy_dx = (my_xp - my_xm) / 2.0
+    dmx_dy = (mx_yp - mx_ym) / 2.0
+    dmy_dy = (my_yp - my_ym) / 2.0
+
+    return (
+        dmx_dx * dmy_dy - dmy_dx * dmx_dy
+    ) / torch.pi
+
+
+def winding_density_rate(
+    current_spin,
+    previous_spin,
+    dt=1.0,
+):
+    r"""
+    RMS-over-layer local rate of change of the existing winding-density map:
+
+        RMS_layers( [w_t - w_(t-1)] / dt )
+
+    Returns:
+        (B, Nx, Ny), nonnegative.
+    """
+    _same_shape(current_spin, previous_spin, "spin")
+    if dt <= 0:
+        raise ValueError("dt must be positive.")
+
+    w_now = winding_density_per_layer(current_spin)
+    w_prev = winding_density_per_layer(previous_spin)
+
+    return _collapse_scalar_layers_rms((w_now - w_prev) / dt)
+
+
+# ---------------------------------------------------------------------------
+# Safe temporal data augmentation
+# ---------------------------------------------------------------------------
+
+def dataug_temporal_physics(
+    x,
+    y,
+    x_prev,
+    y_prev,
+    x_next=None,
+    y_next=None,
+):
+    """
+    Apply ONE identical physical symmetry to all temporally aligned arrays.
+
+    This replaces separate dataug() calls, which would corrupt temporal rates if
+    current and previous states receive different randomly selected symmetries.
+
+    Requires the existing tensor_rotate() function in utils.py.
+    """
+    tensors = [x, y, x_prev, y_prev]
+
+    if x_next is not None:
+        tensors.append(x_next)
+    if y_next is not None:
+        tensors.append(y_next)
+
+    n = x.shape[0] // 10
+    if n == 0:
+        return tuple(tensors)
+
+    selected_symmetry = random.choice(
+        ['R90', 'R180', 'R270', 'RX', 'RY']
+    )
+
+    def _augment_one(tensor):
+        if tensor.ndim != 4 or tensor.shape[1] % 3 != 0:
+            raise ValueError(
+                "Each augmented tensor must have shape "
+                "(B, 3*layers, Nx, Ny)."
+            )
+
+        transformed_layers = []
+
+        for start in range(0, tensor.shape[1], 3):
+            transformed_layers.append(
+                tensor_rotate(
+                    tensor[:n, start:start + 3],
+                    symtype=selected_symmetry,
+                )
+            )
+
+        transformed = torch.cat(transformed_layers, dim=1)
+        return torch.cat((tensor, transformed), dim=0)
+
+    return tuple(_augment_one(t) for t in tensors)
+
+
+def gradient_magnitude(spin_batch, dx=1.0, dy=1.0, dz=1.0):
+    """
+    Full bilayer magnetization-gradient magnitude.
+
+    Input:
+        spin_batch: (B, 3*layers, Nx, Ny)
+
+    Returns:
+        (B, Nx, Ny)
+    """
+
+    grad = magnetization_gradient_tensor_3d(
+        spin_batch,
+        dx=dx,
+        dy=dy,
+        dz=dz,
+    )
+
+    # grad:
+    # (B, Nx, Ny, layers, m_component, spatial_direction)
+
+    return torch.sqrt(
+        torch.sum(
+            grad ** 2,
+            dim=(3, 4, 5)
+        )
+    )
