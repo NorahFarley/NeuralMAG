@@ -93,13 +93,13 @@ def train(epoch, model, optim, train_dataloader):
         elif args.loss_type == "gradient_tensor_rate":
             wd = gradient_tensor_rate(x, x_prev)
 
-        elif args.loss_type == "exch_field_rate":
+        elif args.loss_type == "exchange_field_rate":
             wd = exchange_field_rate(x, x_prev)
 
-        elif args.loss_type == "exch_torque_rate":
+        elif args.loss_type == "exchange_torque_rate":
             wd = exchange_torque_rate(x, x_prev)
 
-        elif args.loss_type == "exch_e_density_rate":
+        elif args.loss_type == "exchange_energy_density_rate":
             wd = exchange_energy_density_rate(x, x_prev)
 
         elif args.loss_type == "demag_torque_rate":
