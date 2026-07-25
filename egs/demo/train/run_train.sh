@@ -1,9 +1,10 @@
 #!/bin/bash
 
-LOSS_TYPE="gradient_tensor_rate"
+LOSS_TYPE="demag_torque_rate"
 ALPHA=0
 TORQUE_LAMBDA=0.1
 EPOCHS=1
+
 
 
 python ./train.py --batch-size 100 \
