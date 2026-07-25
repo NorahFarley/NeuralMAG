@@ -14,7 +14,7 @@ import torch.optim as optimizer
 
 from Unet import UNet
 from data_load import (dataset_prepare, dataset_prepare_temporal_physics,)
-from .utils import *
+from utils import * 
 
 RATE_LOSS_TYPES = {
     "gradient_mag_rate",

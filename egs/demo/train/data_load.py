@@ -4,7 +4,7 @@ import torch
 import random
 import numpy as np
 from tqdm import tqdm
-from utils import *
+from utils import print_memory, winding_density
 from collections import OrderedDict
 
 def get_case_paths(paths):
@@ -124,22 +124,16 @@ def get_case_paths_temporal_physics(path):
     cases = []
 
     for root, _, files in os.walk(path):
-        required = {
-            "Spins.npy",
-            "Hds.npy",
-            "Spins_prev.npy",
-            "Hds_prev.npy",
-        }
+        required = {"Spins.npy",
+                    "Hds.npy",
+                    "Spins_prev.npy",
+                    "Hds_prev.npy"}
 
         if required.issubset(files):
-            cases.append(
-                (
-                    os.path.join(root, "Spins.npy"),
-                    os.path.join(root, "Hds.npy"),
-                    os.path.join(root, "Spins_prev.npy"),
-                    os.path.join(root, "Hds_prev.npy"),
-                )
-            )
+            cases.append((os.path.join(root, "Spins.npy"),
+                          os.path.join(root, "Hds.npy"),
+                          os.path.join(root, "Spins_prev.npy"),
+                          os.path.join(root, "Hds_prev.npy")))
 
     cases.sort()
     return cases
