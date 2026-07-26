@@ -430,6 +430,12 @@ def plot_results(
         dpi=300,
         bbox_inches="tight",
     )
+    # The final field step contains the complete M-H curve. Save a second,  
+    # obvious filename so it is easy to find.
+    if nloop == len(hext_range) - 1:
+        fig.savefig(os.path.join(save_path_iteration, "final_loop_full_mh_diagnostic.png"), 
+                    dpi=300, bbox_inches="tight")
+
     plt.close(fig)
 
 
@@ -899,7 +905,7 @@ def main() -> None:
             f"Iterations: FFT [{iterations_fft}] | UNet [{iterations_unet}]"
         )
 
-        if not args.skip_original_plots:
+        if not args.skip_original_plots or (nloop == len(hext_range) - 1):
             plot_results(
                 nloop=nloop,
                 spin_mm=spin_mm,

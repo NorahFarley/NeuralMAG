@@ -803,33 +803,37 @@ def plot_error_summary(
     panels = (
         (
             inst_hd_mae,
+            "darkorange",
             "UNet Demagnetizing-Field Error",
             r"$H_{demag}$ component MAE [Oe]",
             "hd",
         ),
         (
             trajectory_mae,
+            "crimson",
             "Magnetization Trajectory Error",
             r"Magnetization component MAE",
             "trajectory",
         ),
         (
             exchange_field_mae,
+            "purple",
             "Exchange-Field Error",
             r"$H_{ex}$ component MAE [Oe]",
             "exchange",
         ),
         (
             anisotropy_field_mae,
+            "teal",
             "Anisotropy-Field Error",
             r"$H_{anis}$ component MAE [Oe]",
             "anisotropy",
         ),
     )
 
-    for ax, (data, title, ylabel, key) in zip(axes.flat, panels):
+    for ax, (data, color, title, ylabel, key) in zip(axes.flat, panels):
         values = np.asarray(data, dtype=float)
-        ax.plot(hext_range, values, lw=2.2, label=title)
+        ax.plot(hext_range, values, color=color, lw=2.2, label=title)
         ax.set_title(title, fontsize=11, fontweight="bold")
         ax.set_xlabel(r"External Field $H_{ext}$ [Oe]")
         ax.set_ylabel(ylabel)
