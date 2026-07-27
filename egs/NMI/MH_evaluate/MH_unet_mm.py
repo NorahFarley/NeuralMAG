@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
-"""Streamlined NeuralMAG M-H evaluation.
-
-This version keeps only the requested outputs:
+"""
+Streamlined NeuralMAG M-H evaluation.
 
 - original one-figure-per-field-step diagnostics
 - error, energy, field, performance, torque, and torque-error summaries
@@ -11,8 +10,6 @@ This version keeps only the requested outputs:
   winding-rate overlays over all four error histories
 - physics_snapshots.csv and the original compact .npy histories
 
-The previous transition-ranking, publication-figure, manuscript, and
-cross-sweep pipeline has been removed.
 """
 
 from __future__ import annotations
@@ -48,6 +45,7 @@ from plots import (
     plot_torque_error_summary,
     plot_torque_summary,
     plot_training_winding_density_vs_hext,
+    plot_training_gradient_tensor_rate_vs_hext,
 )
 
 
@@ -383,7 +381,7 @@ def plot_results(
     axes[0, 3].set_title("M-H data", fontsize=16)
     axes[0, 3].set_xlabel(r"$H_{ext}$ [Oe]", fontsize=16)
     axes[0, 3].set_ylabel(
-        r"Longitudinal Magnetization $M_{\parallel}/M_s$",
+        r"Reduced longitudinal magnetization $m_{\parallel}=M_{\parallel}/M_s$",
         fontsize=14,
     )
     axes[0, 3].set_xlim(min(hext_range) * 1.1, max(hext_range) * 1.1)
@@ -430,13 +428,82 @@ def plot_results(
         dpi=300,
         bbox_inches="tight",
     )
-    # The final field step contains the complete M-H curve. Save a second,  
+
+    # The final field step contains the complete M-H curve. Save a second,
     # obvious filename so it is easy to find.
     if nloop == len(hext_range) - 1:
-        fig.savefig(os.path.join(save_path_iteration, "final_loop_full_mh_diagnostic.png"), 
-                    dpi=300, bbox_inches="tight")
+        fig.savefig(
+            os.path.join(save_path_iteration, "final_loop_full_mh_diagnostic.png"),
+            dpi=300,
+            bbox_inches="tight",
+        )
 
     plt.close(fig)
+
+
+def plot_final_mh_curves(
+    general_title_summary,
+    save_path_summary,
+    hext_values,
+    m_fft,
+    m_unet,
+):
+    """Save full and zoomed standalone M-H curves at the end of the sweep.
+
+    The recorded quantity is the projection of the mean reduced magnetization
+    onto the applied-field sweep direction, so the physically precise label is
+
+        m_parallel = M_parallel / M_s.
+    """
+    folder = Path(save_path_summary)
+    folder.mkdir(parents=True, exist_ok=True)
+
+    hext_values = np.asarray(hext_values, dtype=float)
+    m_fft = np.asarray(m_fft, dtype=float)
+    m_unet = np.asarray(m_unet, dtype=float)
+
+    def _save(filename, title, x_limits):
+        fig, ax = plt.subplots(figsize=(8, 6))
+        ax.plot(hext_values, m_fft, lw=2.4, label="FFT/LLG")
+        ax.plot(hext_values, m_unet, lw=2.4, label="UNet/LLG")
+        ax.set_title(
+            title + "\n" + general_title_summary,
+            fontsize=11,
+            fontweight="bold",
+        )
+        ax.set_xlabel(r"External Field $H_{ext}$ [Oe]")
+        ax.set_ylabel(
+            r"Reduced longitudinal magnetization "
+            r"$m_{\parallel}=M_{\parallel}/M_s$"
+        )
+        ax.set_xlim(*x_limits)
+        ax.set_ylim(-1.1, 1.1)
+        ax.grid(True, linestyle="--", alpha=0.4)
+        ax.legend(fontsize=9)
+        fig.tight_layout()
+        fig.savefig(
+            folder / filename,
+            dpi=300,
+            bbox_inches="tight",
+        )
+        plt.close(fig)
+
+    # Conventional axis orientation: negative Hext on the left,
+    # positive Hext on the right.
+    _save(
+        "mh_curve_full.png",
+        "Full M-H Curve",
+        (float(np.nanmin(hext_values)), float(np.nanmax(hext_values))),
+    )
+
+    # Requested transition-region view. With an ascending x axis this is
+    # displayed from -750 Oe on the left to +250 Oe on the right.
+    _save(
+        "mh_curve_zoom_minus750_to_plus250.png",
+        r"Zoomed M-H Curve ($-750 \leq H_{ext} \leq 250$ Oe)",
+        (-750.0, 250.0),
+    )
+
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -573,6 +640,7 @@ def main() -> None:
         "gradient_loop_abs_change_per_oe",
         "gradient_tensor_loop_abs_change_mean",
         "gradient_tensor_loop_abs_change_per_oe",
+        "gradient_tensor_training_rate_mean",
         "exchange_proxy_loop_abs_change_mean",
         "exchange_proxy_loop_abs_change_per_oe",
         "exchange_energy_density_loop_abs_change_mean",
@@ -905,7 +973,9 @@ def main() -> None:
             f"Iterations: FFT [{iterations_fft}] | UNet [{iterations_unet}]"
         )
 
-        if not args.skip_original_plots or (nloop == len(hext_range) - 1):
+        # Skip intermediate original diagnostics when requested, but ALWAYS
+        # save the final loop because it contains the complete M-H curve.
+        if (not args.skip_original_plots) or (nloop == len(hext_range) - 1):
             plot_results(
                 nloop=nloop,
                 spin_mm=spin_mm,
@@ -989,6 +1059,16 @@ def main() -> None:
         f"{output_dir / 'physics_snapshots.csv'}"
     )
 
+    # Always save the two final standalone M-H curves, even when the optional
+    # summary-plot suite is disabled.
+    plot_final_mh_curves(
+        general_title_summary,
+        str(summary_dir),
+        x_plot,
+        y_fft,
+        y_unet,
+    )
+
     if args.skip_summary_plots:
         return
 
@@ -1066,6 +1146,13 @@ def main() -> None:
         loop_change_fft,
         loop_change_unet,
     )
+    plot_training_gradient_tensor_rate_vs_hext(
+        general_title_summary,
+        str(summary_dir),
+        hext_range,
+        loop_change_fft,
+        loop_change_unet,
+    )
     plot_physics_vector_rate_summary(
         general_title_summary,
         str(summary_dir),
@@ -1103,4 +1190,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 

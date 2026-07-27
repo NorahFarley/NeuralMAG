@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-"""Requested M-H diagnostics for the NeuralMAG accuracy project.
+"""
+ M-H diagnostics for the NeuralMAG accuracy project.
 
 - error summary
 - torque summary
@@ -229,6 +230,128 @@ def compute_training_texture_metrics(
     }
 
 
+def _training_first_derivative_all_cells(values, dim, spacing):
+    """Finite difference used by the training-code gradient tensor."""
+    if spacing <= 0:
+        raise ValueError("Spatial spacing must be positive.")
+
+    if values.shape[dim] < 2:
+        return torch.zeros_like(values)
+
+    derivative = torch.empty_like(values)
+
+    center = [slice(None)] * values.ndim
+    plus = [slice(None)] * values.ndim
+    minus = [slice(None)] * values.ndim
+    center[dim] = slice(1, -1)
+    plus[dim] = slice(2, None)
+    minus[dim] = slice(None, -2)
+
+    if values.shape[dim] > 2:
+        derivative[tuple(center)] = (
+            values[tuple(plus)] - values[tuple(minus)]
+        ) / (2.0 * spacing)
+
+    first = [slice(None)] * values.ndim
+    second = [slice(None)] * values.ndim
+    first[dim] = 0
+    second[dim] = 1
+    derivative[tuple(first)] = (
+        values[tuple(second)] - values[tuple(first)]
+    ) / spacing
+
+    last = [slice(None)] * values.ndim
+    before_last = [slice(None)] * values.ndim
+    last[dim] = -1
+    before_last[dim] = -2
+    derivative[tuple(last)] = (
+        values[tuple(last)] - values[tuple(before_last)]
+    ) / spacing
+
+    return derivative
+
+
+def _training_gradient_tensor_3d_from_mag2305(
+    spin,
+    dx=1.0,
+    dy=1.0,
+    dz=1.0,
+):
+    """Exact equivalent of training utils.magnetization_gradient_tensor_3d().
+
+    MAG2305 stores spin as (Nx, Ny, layers, 3), whereas the training utility
+    internally uses (B, Nx, Ny, layers, 3). This function only adds the batch
+    dimension; the finite-difference math is kept the same.
+    """
+    m = spin if isinstance(spin, torch.Tensor) else torch.as_tensor(spin)
+
+    if m.ndim != 4 or m.shape[-1] != 3:
+        raise ValueError(
+            "Expected MAG2305 spin shape (Nx, Ny, layers, 3); "
+            f"received {tuple(m.shape)}."
+        )
+
+    m = m.unsqueeze(0)
+
+    dm_dx = _training_first_derivative_all_cells(m, dim=1, spacing=dx)
+    dm_dy = _training_first_derivative_all_cells(m, dim=2, spacing=dy)
+
+    if m.shape[3] == 1:
+        dm_dz = torch.zeros_like(m)
+    elif m.shape[3] == 2:
+        dz_pair = (m[:, :, :, 1, :] - m[:, :, :, 0, :]) / dz
+        dm_dz = torch.stack((dz_pair, dz_pair), dim=3)
+    else:
+        dm_dz = _training_first_derivative_all_cells(m, dim=3, spacing=dz)
+
+    return torch.stack((dm_dx, dm_dy, dm_dz), dim=-1)
+
+
+def _training_gradient_tensor_rate_map(
+    current_spin,
+    previous_spin,
+    dt=1.0,
+    dx=1.0,
+    dy=1.0,
+    dz=1.0,
+):
+    """Exact local map produced by training utils.gradient_tensor_rate().
+
+    The training call does not pass dt, dx, dy, or dz, so all four defaults
+    are 1.0. The returned map has shape (1, Nx, Ny).
+    """
+    if dt <= 0:
+        raise ValueError("dt must be positive.")
+
+    current_tensor = (
+        current_spin
+        if isinstance(current_spin, torch.Tensor)
+        else torch.as_tensor(current_spin)
+    )
+    previous_tensor = (
+        previous_spin
+        if isinstance(previous_spin, torch.Tensor)
+        else torch.as_tensor(previous_spin)
+    ).to(device=current_tensor.device, dtype=current_tensor.dtype)
+
+    if current_tensor.shape != previous_tensor.shape:
+        raise ValueError(
+            "Current and previous spins must have identical shapes; "
+            f"got {tuple(current_tensor.shape)} and "
+            f"{tuple(previous_tensor.shape)}."
+        )
+
+    grad_now = _training_gradient_tensor_3d_from_mag2305(
+        current_tensor, dx=dx, dy=dy, dz=dz
+    )
+    grad_prev = _training_gradient_tensor_3d_from_mag2305(
+        previous_tensor, dx=dx, dy=dy, dz=dz
+    )
+
+    delta_grad = (grad_now - grad_prev) / dt
+    return torch.sqrt(torch.sum(delta_grad.square(), dim=(3, 4, 5)))
+
+
 @torch.no_grad()
 def compute_exact_loop_change_metrics(
     current_spin,
@@ -261,6 +384,11 @@ def compute_exact_loop_change_metrics(
         "gradient_tensor_loop_abs_change_mean": float("nan"),
         "gradient_tensor_loop_abs_change_per_oe": float("nan"),
 
+        # Spatial mean of the EXACT local map used by the current
+        # gradient_tensor_rate training loss. This uses both magnetic layers,
+        # x/y/z derivatives, and the training defaults dt=dx=dy=dz=1.
+        "gradient_tensor_training_rate_mean": float("nan"),
+
         "exchange_proxy_loop_abs_change_mean": float("nan"),
         "exchange_proxy_loop_abs_change_per_oe": float("nan"),
         "winding_map_loop_abs_change_mean": float("nan"),
@@ -269,6 +397,20 @@ def compute_exact_loop_change_metrics(
 
     if previous_spin is None:
         return result
+
+    # Exact training-code gradient-tensor-rate map. The training loss uses
+    # this local map directly (after unsqueeze/broadcast into its weight).
+    training_rate_map = _training_gradient_tensor_rate_map(
+        current_spin,
+        previous_spin,
+        dt=1.0,
+        dx=1.0,
+        dy=1.0,
+        dz=1.0,
+    )
+    result["gradient_tensor_training_rate_mean"] = float(
+        training_rate_map.mean().item()
+    )
 
     previous = _layer0_training_tensor(previous_spin).to(
         device=current.device,
@@ -342,6 +484,15 @@ def _set_reversed_hext_axis(ax, hext_range):
     minimum = float(np.nanmin(values))
     pad = 0.05 * (maximum - minimum if maximum != minimum else 1.0)
     ax.set_xlim(maximum + pad, minimum - pad)
+
+
+def _set_ascending_hext_axis(ax, hext_range, pad_fraction=0.0):
+    """Display Hext conventionally from negative on the left to positive right."""
+    values = np.asarray(hext_range, dtype=float)
+    minimum = float(np.nanmin(values))
+    maximum = float(np.nanmax(values))
+    pad = pad_fraction * (maximum - minimum if maximum != minimum else 1.0)
+    ax.set_xlim(minimum - pad, maximum + pad)
 
 
 def _combined_legend(ax, twin):
@@ -521,11 +672,9 @@ def plot_gradient_change_rate_summary(
 
         mean(||grad(m_i)| - |grad(m_(i-1))||) / |delta Hext|.
 
-    The full gradient-tensor rate is
-
-        mean(||grad(m_i - m_(i-1))||_F) / |delta Hext|.
-
-    Both use exact cellwise changes before spatial averaging.
+    The fourth panel is the exact training-code gradient_tensor_rate
+    quantity, spatially averaged only for visualization. It uses both layers,
+    x/y/z derivatives, and the same default dt=dx=dy=dz=1 used by train.py.
     """
     folder = _output_folder(save_path_summary)
     fig, axes = plt.subplots(2, 3, figsize=(21, 11), sharex=True)
@@ -562,10 +711,10 @@ def plot_gradient_change_rate_summary(
         (
             loop_fft,
             loop_unet,
-            "gradient_tensor_loop_abs_change_per_oe",
-            "Full Gradient-Tensor Rate",
-            r"Mean $||\nabla(m_i-m_{i-1})||_F/|\Delta H_{ext}|$ "
-            r"[cell$^{-1}$/Oe]",
+            "gradient_tensor_training_rate_mean",
+            "Training Gradient-Tensor Rate (Exact Loss Quantity)",
+            r"Full-grid mean $||\Delta(\nabla m)||_F$ "
+            r"(training defaults: $dt=dx=dy=dz=1$)",
         ),
         (
             loop_fft,
@@ -591,7 +740,7 @@ def plot_gradient_change_rate_summary(
         ax.set_title(title, fontsize=11, fontweight="bold")
         ax.set_xlabel(r"External Field $H_{ext}$ [Oe]")
         ax.set_ylabel(ylabel)
-        _set_reversed_hext_axis(ax, hext_range)
+        _set_ascending_hext_axis(ax, hext_range)
         ax.grid(True, linestyle="--", alpha=0.4)
         ax.legend(fontsize=9)
 
@@ -602,6 +751,54 @@ def plot_gradient_change_rate_summary(
         bbox_inches="tight",
     )
     plt.close(fig)
+
+
+def plot_training_gradient_tensor_rate_vs_hext(
+    general_title_summary,
+    save_path_summary,
+    hext_range,
+    loop_fft,
+    loop_unet,
+):
+    """Standalone plot of the exact gradient_tensor_rate training quantity."""
+    folder = _output_folder(save_path_summary)
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.plot(
+        hext_range,
+        loop_fft["gradient_tensor_training_rate_mean"],
+        lw=2.4,
+        label="FFT/LLG",
+    )
+    ax.plot(
+        hext_range,
+        loop_unet["gradient_tensor_training_rate_mean"],
+        lw=2.4,
+        label="UNet/LLG",
+    )
+    ax.set_title(
+        "Training Gradient-Tensor Rate Across the M-H Sweep\n"
+        + general_title_summary,
+        fontsize=11,
+        fontweight="bold",
+    )
+    ax.set_xlabel(r"External Field $H_{ext}$ [Oe]")
+    ax.set_ylabel(
+        r"Full-grid mean $||\Delta(\nabla m)||_F$ "
+        r"($dt=dx=dy=dz=1$)"
+    )
+    _set_ascending_hext_axis(ax, hext_range)
+    ax.grid(True, linestyle="--", alpha=0.4)
+    ax.legend(fontsize=9)
+
+    fig.tight_layout()
+    fig.savefig(
+        os.path.join(folder, "training_gradient_tensor_rate_vs_hext.png"),
+        dpi=300,
+        bbox_inches="tight",
+    )
+    plt.close(fig)
+
 
 
 def plot_physics_vector_rate_summary(
@@ -793,13 +990,6 @@ def plot_error_summary(
     if y_limits is not None:
         fixed_limits.update(y_limits)
 
-    fig, axes = plt.subplots(2, 2, figsize=(15, 12), sharex=True)
-    fig.suptitle(
-        "Field and Magnetization Error Summary\n\n" + general_title_summary,
-        fontsize=13,
-        fontweight="bold",
-    )
-
     panels = (
         (
             inst_hd_mae,
@@ -831,6 +1021,14 @@ def plot_error_summary(
         ),
     )
 
+    # Comprehensive four-panel plot.
+    fig, axes = plt.subplots(2, 2, figsize=(15, 12), sharex=True)
+    fig.suptitle(
+        "Field and Magnetization Error Summary\n\n" + general_title_summary,
+        fontsize=13,
+        fontweight="bold",
+    )
+
     for ax, (data, color, title, ylabel, key) in zip(axes.flat, panels):
         values = np.asarray(data, dtype=float)
         ax.plot(hext_range, values, color=color, lw=2.2, label=title)
@@ -838,7 +1036,7 @@ def plot_error_summary(
         ax.set_xlabel(r"External Field $H_{ext}$ [Oe]")
         ax.set_ylabel(ylabel)
         ax.set_ylim(*fixed_limits[key])
-        _set_reversed_hext_axis(ax, hext_range)
+        _set_ascending_hext_axis(ax, hext_range)
         ax.grid(True, linestyle="--", alpha=0.4)
         ax.legend(fontsize=9)
 
@@ -859,6 +1057,44 @@ def plot_error_summary(
         bbox_inches="tight",
     )
     plt.close(fig)
+
+    # Save the two main error histories as standalone 8 x 6 plots as well.
+    standalone = (
+        (
+            inst_hd_mae,
+            "darkorange",
+            "UNet Demagnetizing-Field Error",
+            r"$H_{demag}$ component MAE [Oe]",
+            "hd",
+            "hdemag_error_vs_hext.png",
+        ),
+        (
+            trajectory_mae,
+            "crimson",
+            "Magnetization Trajectory Error",
+            "Magnetization component MAE",
+            "trajectory",
+            "magnetization_trajectory_error_vs_hext.png",
+        ),
+    )
+
+    for data, color, title, ylabel, key, filename in standalone:
+        fig, ax = plt.subplots(figsize=(8, 6))
+        values = np.asarray(data, dtype=float)
+        ax.plot(hext_range, values, color=color, lw=2.4)
+        ax.set_title(title + "\n" + general_title_summary, fontsize=11, fontweight="bold")
+        ax.set_xlabel(r"External Field $H_{ext}$ [Oe]")
+        ax.set_ylabel(ylabel)
+        ax.set_ylim(*fixed_limits[key])
+        _set_ascending_hext_axis(ax, hext_range)
+        ax.grid(True, linestyle="--", alpha=0.4)
+        fig.tight_layout()
+        fig.savefig(
+            os.path.join(folder, filename),
+            dpi=300,
+            bbox_inches="tight",
+        )
+        plt.close(fig)
 
 
 def plot_fields_summary(
@@ -1146,4 +1382,5 @@ def plot_loop_change_error_overlays(
             bbox_inches="tight",
         )
         plt.close(fig)
+
 
