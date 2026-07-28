@@ -96,11 +96,14 @@ def getdata(paths, ntest, n128, ntrain, cn, mode=None):
 def dataset_prepare(data_paths, ntest, n128, ntrain, cn, mode=None):
     print('loading data from: ', data_paths)
     if mode=='eval128':
+        print_memory("Before loading 128 evaluation dataset")
         X_test, Y_test = getdata(data_paths, ntest, n128, ntrain, cn, mode)
+        print_memory("After loading 128 evaluation NumPy arrays")
         #prepare test set
         X_test_tensor = torch.from_numpy(X_test).float()
         y_test_tensor = torch.from_numpy(Y_test).float()
         test_dataset  = torch.utils.data.TensorDataset(X_test_tensor, y_test_tensor)
+        print_memory("After preparing 128 evaluation TensorDataset")
         return test_dataset
     else:
         print_memory("Before getdata")

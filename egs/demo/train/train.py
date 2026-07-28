@@ -27,6 +27,133 @@ RATE_LOSS_TYPES = {
     "winding_density_rate"}
 
 
+def _uses_alpha(loss_type):
+    return loss_type not in ("baseline", "torque_mismatch")
+
+
+def _loss_parameter_tag(args):
+    """Tag only the coefficient that actually participates in this loss."""
+    if args.loss_type == "torque_mismatch":
+        return f"torque_lambda{args.torque_lambda:g}"
+    if _uses_alpha(args.loss_type):
+        return f"alpha{args.alpha:g}"
+    return ""
+
+
+def _loss_descriptor(args):
+    if args.loss_type == "torque_mismatch":
+        return f"loss={args.loss_type} torque_lambda={args.torque_lambda:g}"
+    if _uses_alpha(args.loss_type):
+        return f"loss={args.loss_type} alpha={args.alpha:g}"
+    return f"loss={args.loss_type}"
+
+
+def _format_duration(seconds):
+    seconds = max(0, int(round(seconds)))
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    if days:
+        return f"{days}d {hours:02d}h {minutes:02d}m"
+    if hours:
+        return f"{hours}h {minutes:02d}m {secs:02d}s"
+    if minutes:
+        return f"{minutes}m {secs:02d}s"
+    return f"{secs}s"
+
+
+def _configure_epoch_logger(ex_path):
+    """
+    One record per completed epoch.
+
+    The StreamHandler writes to stderr, which restores the old Slurm behavior:
+    epoch summaries go to the job error log, while normal print() output goes to
+    the job output log. A duplicate copy is saved inside the experiment folder.
+    """
+    logger = logging.getLogger("neuralmag_epoch")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    logger.handlers.clear()
+
+    formatter = logging.Formatter("%(asctime)s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.setFormatter(formatter)
+    logger.addHandler(stderr_handler)
+
+    file_handler = logging.FileHandler(os.path.join(ex_path, "training.log"), mode="a")
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    return logger
+
+
+_observed_memory_peak = {
+    "ram_total_with_workers_gb": 0.0,
+    "ram_main_gb": 0.0,
+    "ram_workers_gb": 0.0,
+    "gpu_allocated_gb": 0.0,
+    "gpu_reserved_gb": 0.0,
+    "gpu_max_allocated_gb": 0.0,
+    "gpu_max_reserved_gb": 0.0,
+}
+
+
+def _sample_memory_peak():
+    """Sample main-process + DataLoader-worker RAM without printing anything."""
+    try:
+        stats = get_memory_stats()
+    except Exception:
+        return
+    for key in _observed_memory_peak:
+        value = float(stats.get(key, 0.0))
+        if value > _observed_memory_peak[key]:
+            _observed_memory_peak[key] = value
+
+
+def _write_memory_record(ex_path, stage, epoch=None):
+    """Append a compact JSON line so memory can be inspected while the job runs."""
+    try:
+        stats = get_memory_stats()
+        _sample_memory_peak()
+        record = {
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "stage": stage,
+            "epoch": epoch,
+            **stats,
+            "observed_peak_so_far": dict(_observed_memory_peak),
+        }
+        with open(os.path.join(ex_path, "memory_usage.jsonl"), "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\\n")
+    except Exception as exc:
+        print(f"Warning: could not record memory snapshot: {exc}", flush=True)
+
+
+def _slurm_environment():
+    keys = (
+        "SLURM_JOB_ID",
+        "SLURM_JOB_NAME",
+        "SLURM_JOB_PARTITION",
+        "SLURM_CPUS_PER_TASK",
+        "SLURM_MEM_PER_NODE",
+        "SLURM_MEM_PER_CPU",
+        "SLURM_GPUS",
+        "SLURM_GPUS_ON_NODE",
+        "SLURM_JOB_NODELIST",
+    )
+    return {key: os.environ.get(key) for key in keys if os.environ.get(key) is not None}
+
+
+def _print_active_loss_settings(args):
+    print("Training configuration:", flush=True)
+    print(f"  loss type: {args.loss_type}", flush=True)
+    if args.loss_type == "torque_mismatch":
+        print(f"  torque lambda: {args.torque_lambda:g}", flush=True)
+    elif _uses_alpha(args.loss_type):
+        print(f"  alpha: {args.alpha:g}", flush=True)
+    print(f"  learning rate: {args.lr:g}", flush=True)
+    print(f"  epochs: {args.epochs}", flush=True)
+
+
 def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_dataloader3):
     model.train()
     Loss = AverageMeter()
@@ -236,7 +363,8 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
                     "96": torque_loss3.item(),
                     "main_loss_32": loss1.item(),
                     "main_loss_64": loss2.item(),
-                    "main_loss_96": loss3.item()}
+                    "main_loss_96": loss3.item(),
+                    "torque_lambda": args.torque_lambda}
 
                 with open(os.path.join(ex_path, "torque_mismatch_stats.json"), "w", encoding="utf-8") as f: json.dump(torque_stats, f, indent=4)
 
@@ -254,17 +382,25 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
         Loss32.update( loss32.mean().item(),  x3.size(0) )
         Loss.update( ((loss11.mean()+loss21.mean()+loss31.mean())/3).item(),  x1.size(0)+x2.size(0)+x3.size(0) )
 
-        percentage = ((batch_idx + 1) / total_batches) * 100
+        # Keep the live batch progress only for a real interactive terminal.
+        # Slurm redirects stdout to a file, so printing every batch there creates
+        # enormous logs. In Slurm, the epoch summary is written once per epoch
+        # through the stderr logger in main().
+        if sys.stdout.isatty():
+            percentage = ((batch_idx + 1) / total_batches) * 100
+            status_text = (
+                f"\rTrain: epoch {epoch} [{percentage:3.0f}%] | Loss {Loss.avg:.1f} | "
+                f"Loss1 {Loss11.avg:.1f}/{Loss12.avg:.3f} | Loss2 {Loss21.avg:.1f}/{Loss22.avg:.3f} | "
+                f"Loss3 {Loss31.avg:.1f}/{Loss32.avg:.3f}")
+            sys.stdout.write(status_text)
+            sys.stdout.flush()
 
-        status_text = (
-            f"\rTrain: epoch {epoch} [{percentage:3.0f}%] | Loss {Loss.avg:.1f} | "
-            f"Loss1 {Loss11.avg:.1f}/{Loss12.avg:.3f} | Loss2 {Loss21.avg:.1f}/{Loss22.avg:.3f} | "
-            f"Loss3 {Loss31.avg:.1f}/{Loss32.avg:.3f}")
-        sys.stdout.write(status_text)
+        if batch_idx == 0 or (batch_idx + 1) % 25 == 0 or (batch_idx + 1) == total_batches:
+            _sample_memory_peak()
+
+    if sys.stdout.isatty():
+        sys.stdout.write('\n')
         sys.stdout.flush()
-
-    # Finish the terminal line at the end of the epoch
-    sys.stdout.write('\n')
 
     #draw every 10 epoch
     if epoch > 0 and epoch % 10 == 0: 
@@ -319,13 +455,18 @@ def eval(epoch, model, dataloader1, dataloader2, dataloader3, dataloader4):
         Loss4.update( loss4.mean().item(),  x4.size(0) )
         Loss.update( ((loss1.mean()+loss2.mean()+loss3.mean()+loss4.mean())/4).item(), x1.size(0)+x2.size(0)+x3.size(0)+x4.size(0) )
 
-        percentage = ((batch_idx + 1) / total_batches) * 100
+        if sys.stdout.isatty():
+            percentage = ((batch_idx + 1) / total_batches) * 100
+            status_text = f"\rEval: epoch {epoch} [{percentage:3.0f}%] | Loss {Loss.avg:.1f} | Loss1 {Loss1.avg:.1f} | Loss2 {Loss2.avg:.1f} | Loss3 {Loss3.avg:.1f} | Loss4 {Loss4.avg:.1f}"
+            sys.stdout.write(status_text)
+            sys.stdout.flush()
 
-        status_text = f"\rEval: epoch {epoch} [{percentage:3.0f}%] | Loss {Loss.avg:.1f} | Loss1 {Loss1.avg:.1f} | Loss2 {Loss2.avg:.1f} | Loss3 {Loss3.avg:.1f} | Loss4 {Loss4.avg:.1f}"
-        sys.stdout.write(status_text)
+        if batch_idx == 0 or (batch_idx + 1) % 25 == 0 or (batch_idx + 1) == total_batches:
+            _sample_memory_peak()
+
+    if sys.stdout.isatty():
+        sys.stdout.write('\n')
         sys.stdout.flush()
-
-    sys.stdout.write('\n')
     
     #draw every 10 epoch
     if epoch > 0 and epoch % 10 == 0: 
@@ -339,31 +480,47 @@ def eval(epoch, model, dataloader1, dataloader2, dataloader3, dataloader4):
 
 if __name__ == '__main__':
 
-    # Training settings
     parser = argparse.ArgumentParser(description='Unet micromagnetics')
-    parser.add_argument('--batch-size', type=int,   default=100,    help='input batch size for training (default: 100)')
-    parser.add_argument('--lr',         type=float, default=0.005,  help='learning rate (default: 0.005)')
-    parser.add_argument('--epochs',     type=int,   default=1000,   help='number of epochs to train (default: 1000)')
-    
-    parser.add_argument('--kc',        type=int,    default=16,     help='kernels of first layer (default: 16)')
-    parser.add_argument('--inch',      type=int,    default=6,      help='input channels (default: 6)')
-    parser.add_argument('--cornum',    type=int,    default=1000,   help='core number (default: 1000)')
-    parser.add_argument('--ntest',     type=int,    default=20,     help='test number (default: 20)')
-    parser.add_argument('--ntrain',    type=int,    default=300,    help='train number (default: 300)')
-
-    parser.add_argument('--gpu',        type=int,   default=0,      help='GPU used (default: 0)')
-    parser.add_argument('--ex',         type=float, default=1.0,    help='experiment (default: 0)')
-    parser.add_argument('--dataug', action=argparse.BooleanOptionalAction, default=True, help='enable physical symmetry augmentation')    
-    parser.add_argument('--alpha',      type=float, default=0.5,    help='weighting coefficient for weighted loss')
-    parser.add_argument('--loss_type',  type=str,  default='baseline', help='loss weighting method')
+    parser.add_argument('--batch-size', type=int, default=100, help='input batch size for 32x32 training (default: 100)')
+    parser.add_argument('--test-batch-size', type=int, default=500, help='evaluation batch size for each resolution (default: 500)')
+    parser.add_argument('--lr', type=float, default=0.005, help='learning rate (default: 0.005)')
+    parser.add_argument('--epochs', type=int, default=1000, help='number of epochs to train (default: 1000)')
+    parser.add_argument('--kc', type=int, default=16, help='kernels of first layer (default: 16)')
+    parser.add_argument('--inch', type=int, default=6, help='input channels (default: 6)')
+    parser.add_argument('--cornum', type=int, default=1000, help='core number (default: 1000)')
+    parser.add_argument('--ntest', type=int, default=20, help='held-out cases per 32/64/96 resolution and eval cases for 128 (default: 20)')
+    parser.add_argument('--ntrain', type=int, default=300, help='training split stop index per 32/64/96 resolution (default: 300)')
+    parser.add_argument('--gpu', type=int, default=0, help='GPU used (default: 0)')
+    parser.add_argument('--ex', type=float, default=1.0, help='experiment identifier (default: 1.0)')
+    parser.add_argument('--dataug', action=argparse.BooleanOptionalAction, default=True, help='enable physical symmetry augmentation')
+    parser.add_argument('--alpha', type=float, default=0.5, help='weighting coefficient for alpha-weighted losses')
+    parser.add_argument('--loss_type', type=str, default='baseline', help='loss weighting method')
     parser.add_argument('--torque-lambda', type=float, default=0.1, help='coefficient for torque-mismatch auxiliary loss')
-    parser.add_argument('--model',      type=str,  default=None,     help='existing model to continue training')
+    parser.add_argument('--model', type=str, default=None, help='existing model to continue training')
+    parser.add_argument('--num-workers', type=int, default=8, help='DataLoader workers PER DataLoader (default: 8)')
     args = parser.parse_args()
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    coefficient_tag = _loss_parameter_tag(args)
+    folder_bits = [timestamp]
+    if coefficient_tag:
+        folder_bits.append(coefficient_tag)
+    folder_bits.extend([
+        f"ex{args.ex}",
+        f"bsz{args.batch_size}",
+        f"lr{args.lr}",
+        f"Unet_kc{args.kc}",
+        f"inch{args.inch}",
+    ])
+    ex_path = os.path.join(f"./{args.loss_type}", "_".join(folder_bits))
+    os.makedirs(ex_path, exist_ok=True)
+
+    # Epoch records go to stderr (Slurm error log) and to epoch_summary.log.
+    # Normal print() output stays on stdout (Slurm output log).
+    epoch_logger = _configure_epoch_logger(ex_path)
 
     if torch.cuda.is_available():
         device = torch.device(f"cuda:{args.gpu}")
-        print(device, flush=True)
-        print(f"GPU reserved : {torch.cuda.memory_reserved()/1024**3:.2f} GB")
         torch.backends.cudnn.benchmark = True
     elif torch.backends.mps.is_available():
         device = torch.device("mps")
@@ -374,100 +531,203 @@ if __name__ == '__main__':
     if device.type == "cuda":
         torch.cuda.manual_seed(0)
     elif device.type == "mps":
-        torch.mps.manual_seed(0)    
-    
-    # Model, optimizer, and data loaders initialization
+        torch.mps.manual_seed(0)
+
+    _print_active_loss_settings(args)
+    print(f"  batch size 32 base: {args.batch_size}", flush=True)
+    print(f"  test batch size: {args.test_batch_size}", flush=True)
+    print(f"  DataLoader workers per loader: {args.num_workers}", flush=True)
+    print(f"  output directory: {ex_path}", flush=True)
+    print(f"  device: {device}", flush=True)
+
+    # Save the launch parameters immediately, before the potentially long data-loading step.
+    active_coefficient = None
+    if args.loss_type == "torque_mismatch":
+        active_coefficient = {"name": "torque_lambda", "value": args.torque_lambda}
+    elif _uses_alpha(args.loss_type):
+        active_coefficient = {"name": "alpha", "value": args.alpha}
+    launch_parameters = {
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "command": " ".join(sys.argv),
+        "output_directory": ex_path,
+        "loss_type": args.loss_type,
+        "active_loss_coefficient": active_coefficient,
+        "arguments_as_parsed": vars(args),
+        "device": str(device),
+        "slurm": _slurm_environment(),
+    }
+    with open(os.path.join(ex_path, "run_parameters.json"), "w", encoding="utf-8") as f:
+        json.dump(launch_parameters, f, indent=4)
+    print(f"Launch parameters saved to {os.path.join(ex_path, 'run_parameters.json')}", flush=True)
+
     model = UNet(kc=args.kc, inc=args.inch, ouc=args.inch).to(device)
     if args.model is not None:
         model.load_state_dict(torch.load(args.model, map_location=device))
         print(f"Loaded model: {args.model}", flush=True)
-    
+
     optim = optimizer.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=0.0001)
+    print_memory("Memory after model initialization")
+    _write_memory_record(ex_path, "after_model_initialization")
 
-    # #load data
-    # data_path11 = '../../../utils/Dataset/data_Hd32_Hext1000_mask'
-    # data_path12 = '../../../utils/Dataset/data_Hd32_Hext100_mask'
-    # data_path13 = '../../../utils/Dataset/data_Hd32_Hext0'
-
-    data_path11 = '../../../utils/Dataset/rate_change/w32/masked1'
-    data_path12 = '../../../utils/Dataset/rate_change/w32/masked2'
-    data_path13 = '../../../utils/Dataset/rate_change/w32/unmasked'
-
-    # data_path21 = '../../../utils/Dataset/data_Hd64_Hext1000_mask'
-    # data_path22 = '../../../utils/Dataset/data_Hd64_Hext100_mask'
-    # data_path23 = '../../../utils/Dataset/data_Hd64_Hext0'
-
-    data_path21 = '../../../utils/Dataset/rate_change/w64/masked1'
-    data_path22 = '../../../utils/Dataset/rate_change/w64/masked2'
-    data_path23 = '../../../utils/Dataset/rate_change/w64/unmasked'
-
-    # data_path31 = '../../../utils/Dataset/data_Hd96_Hext1000_mask'
-    # data_path32 = '../../../utils/Dataset/data_Hd96_Hext100_mask'
-    # data_path33 = '../../../utils/Dataset/data_Hd96_Hext0'
-
-    data_path31 = '../../../utils/Dataset/rate_change/w96/masked1'
-    data_path32 = '../../../utils/Dataset/rate_change/w96/masked2'
-    data_path33 = '../../../utils/Dataset/rate_change/w96/unmasked'
-
-    # data_path41 = '../../../utils/Dataset/data_Hd128_Hext1000_mask'
-    # data_path42 = '../../../utils/Dataset/data_Hd128_Hext100_mask'
-    # data_path43 = '../../../utils/Dataset/data_Hd128_Hext0'
-
-    data_path41 = '../../../utils/Dataset/rate_change/w128/masked1'
-    data_path42 = '../../../utils/Dataset/rate_change/w128/masked2'
-    data_path43 = '../../../utils/Dataset/rate_change/w128/unmasked'
-    
-    data_path1 = [data_path11, data_path12, data_path13]
-    data_path2 = [data_path21, data_path22, data_path23]
-    data_path3 = [data_path31, data_path32, data_path33]
-    data_path4 = [data_path41, data_path42, data_path43]
+    # Training data paths: 32, 64, 96. 128 is evaluation-only.
+    data_path1 = [
+        '../../../utils/Dataset/rate_change/w32/masked1',
+        '../../../utils/Dataset/rate_change/w32/masked2',
+        '../../../utils/Dataset/rate_change/w32/unmasked',
+    ]
+    data_path2 = [
+        '../../../utils/Dataset/rate_change/w64/masked1',
+        '../../../utils/Dataset/rate_change/w64/masked2',
+        '../../../utils/Dataset/rate_change/w64/unmasked',
+    ]
+    data_path3 = [
+        '../../../utils/Dataset/rate_change/w96/masked1',
+        '../../../utils/Dataset/rate_change/w96/masked2',
+        '../../../utils/Dataset/rate_change/w96/unmasked',
+    ]
+    data_path4 = [
+        '../../../utils/Dataset/rate_change/w128/masked1',
+        '../../../utils/Dataset/rate_change/w128/masked2',
+        '../../../utils/Dataset/rate_change/w128/unmasked',
+    ]
 
     print("Creating datasets", flush=True)
+    use_temporal_data = args.loss_type in RATE_LOSS_TYPES
+    train_dataset1, test_dataset1 = dataset_prepare_temporal_physics(
+        data_path1, ntest=args.ntest, ntrain=args.ntrain, cn=args.cornum,
+        include_previous_train=use_temporal_data,
+    )
+    train_dataset2, test_dataset2 = dataset_prepare_temporal_physics(
+        data_path2, ntest=args.ntest, ntrain=args.ntrain, cn=args.cornum,
+        include_previous_train=use_temporal_data,
+    )
+    train_dataset3, test_dataset3 = dataset_prepare_temporal_physics(
+        data_path3, ntest=args.ntest, ntrain=args.ntrain, cn=args.cornum,
+        include_previous_train=use_temporal_data,
+    )
+    test_dataset4 = dataset_prepare(
+        data_path4, ntest=0, n128=args.ntest, ntrain=0, cn=args.cornum,
+        mode='eval128',
+    )
 
-    use_temporal_data = (args.loss_type in RATE_LOSS_TYPES)
-    train_dataset1, test_dataset1 = dataset_prepare_temporal_physics(data_path1, ntest=args.ntest, ntrain=args.ntrain, cn=args.cornum, include_previous_train=use_temporal_data)
-    train_dataset2, test_dataset2 = dataset_prepare_temporal_physics(data_path2, ntest=args.ntest, ntrain=args.ntrain, cn=args.cornum, include_previous_train=use_temporal_data)
-    train_dataset3, test_dataset3 = dataset_prepare_temporal_physics(data_path3, ntest=args.ntest, ntrain=args.ntrain, cn=args.cornum, include_previous_train=use_temporal_data)
+    print_memory("Memory after preparing datasets")
+    _write_memory_record(ex_path, "after_dataset_preparation")
 
-    # 128 is evaluation-only for every loss type
-    test_dataset4 = dataset_prepare(data_path4, ntest=0, n128=args.ntest, ntrain=0, cn=args.cornum, mode='eval128')
+    bsz1 = args.batch_size
+    bsz2 = round(bsz1 / (len(train_dataset1) / len(train_dataset2)))
+    bsz3 = round(bsz1 / (len(train_dataset1) / len(train_dataset3)))
 
-    print_memory(msg="Memory used after preparing datasets")
+    print(
+        f"training samples: 32={len(train_dataset1)}, 64={len(train_dataset2)}, 96={len(train_dataset3)}",
+        flush=True,
+    )
+    print(
+        f"testing/evaluation samples: 32={len(test_dataset1)}, 64={len(test_dataset2)}, "
+        f"96={len(test_dataset3)}, 128={len(test_dataset4)}",
+        flush=True,
+    )
+    print(f"training batch sizes: 32={bsz1}, 64={bsz2}, 96={bsz3}", flush=True)
 
-    bsz1=args.batch_size
-    print('samples 1 2 3:',len(train_dataset1), len(train_dataset2), len(train_dataset3))
-    bsz2=round(bsz1 / (len(train_dataset1) / len(train_dataset2)))
-    bsz3=round(bsz1 / (len(train_dataset1) / len(train_dataset3)))
-    print('batch size 1 2 3: ',bsz1, bsz2, bsz3,'\n')
-
-
-    train_dataloader1 = torch.utils.data.DataLoader(dataset=train_dataset1, batch_size=bsz1, shuffle=True,  num_workers=8, drop_last=False)
-    train_dataloader2 = torch.utils.data.DataLoader(dataset=train_dataset2, batch_size=bsz2, shuffle=True,  num_workers=8, drop_last=False)
-    train_dataloader3 = torch.utils.data.DataLoader(dataset=train_dataset3, batch_size=bsz3, shuffle=True,  num_workers=8, drop_last=False)
-    
-    test_dataloader1  = torch.utils.data.DataLoader(dataset=test_dataset1,  batch_size=500, shuffle=True,  num_workers=8, drop_last=False) 
-    test_dataloader2  = torch.utils.data.DataLoader(dataset=test_dataset2,  batch_size=500, shuffle=True,  num_workers=8, drop_last=False)
-    test_dataloader3  = torch.utils.data.DataLoader(dataset=test_dataset3,  batch_size=500, shuffle=True,  num_workers=8, drop_last=False)
-    test_dataloader4  = torch.utils.data.DataLoader(dataset=test_dataset4,  batch_size=500, shuffle=True,  num_workers=8, drop_last=False)
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    #experiment path
-    ex_path = os.path.join(f"./{args.loss_type}",
-                           f"{timestamp}_ex{args.ex}_bsz{bsz1}_lr{args.lr}_Unet_kc{args.kc}_inch{args.inch}",)
-    os.makedirs(ex_path, exist_ok=True)
-
-    # Set up logging
-    logging.basicConfig(filename=ex_path + '/training.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    train_dataloader1 = torch.utils.data.DataLoader(
+        dataset=train_dataset1, batch_size=bsz1, shuffle=True,
+        num_workers=args.num_workers, drop_last=False,
+    )
+    train_dataloader2 = torch.utils.data.DataLoader(
+        dataset=train_dataset2, batch_size=bsz2, shuffle=True,
+        num_workers=args.num_workers, drop_last=False,
+    )
+    train_dataloader3 = torch.utils.data.DataLoader(
+        dataset=train_dataset3, batch_size=bsz3, shuffle=True,
+        num_workers=args.num_workers, drop_last=False,
+    )
+    test_dataloader1 = torch.utils.data.DataLoader(
+        dataset=test_dataset1, batch_size=args.test_batch_size, shuffle=True,
+        num_workers=args.num_workers, drop_last=False,
+    )
+    test_dataloader2 = torch.utils.data.DataLoader(
+        dataset=test_dataset2, batch_size=args.test_batch_size, shuffle=True,
+        num_workers=args.num_workers, drop_last=False,
+    )
+    test_dataloader3 = torch.utils.data.DataLoader(
+        dataset=test_dataset3, batch_size=args.test_batch_size, shuffle=True,
+        num_workers=args.num_workers, drop_last=False,
+    )
+    test_dataloader4 = torch.utils.data.DataLoader(
+        dataset=test_dataset4, batch_size=args.test_batch_size, shuffle=True,
+        num_workers=args.num_workers, drop_last=False,
+    )
 
     num_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-    logging.info(f"Total parameters: {num_params:,}")
-    logging.info(f"Trainable parameters: {trainable_params:,}")
-
-    logging.info(f"GPU: {torch.cuda.get_device_name(device)}")
-    logging.info(f"PyTorch: {torch.__version__}")
+    loss_settings = {
+        "loss_type": args.loss_type,
+        "uses_alpha": _uses_alpha(args.loss_type),
+        "alpha": args.alpha if _uses_alpha(args.loss_type) else None,
+        "uses_torque_lambda": args.loss_type == "torque_mismatch",
+        "torque_lambda": args.torque_lambda if args.loss_type == "torque_mismatch" else None,
+    }
+    run_config = {
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "command": " ".join(sys.argv),
+        "output_directory": ex_path,
+        "loss": loss_settings,
+        "optimizer": {
+            "name": "Adam",
+            "learning_rate": args.lr,
+            "betas": [0.9, 0.999],
+            "weight_decay": 1e-4,
+        },
+        "training": {
+            "epochs": args.epochs,
+            "batch_size_32": bsz1,
+            "batch_size_64": bsz2,
+            "batch_size_96": bsz3,
+            "test_batch_size": args.test_batch_size,
+            "num_workers_per_dataloader": args.num_workers,
+            "simultaneous_train_dataloaders": 3,
+            "simultaneous_eval_dataloaders": 4,
+            "data_augmentation": args.dataug,
+            "temporal_previous_state_loaded_for_training": use_temporal_data,
+            "cornum": args.cornum,
+            "ntest_cases_requested": args.ntest,
+            "ntrain_split_stop": args.ntrain,
+            "random_seed_torch": 0,
+        },
+        "samples": {
+            "train_32": len(train_dataset1),
+            "train_64": len(train_dataset2),
+            "train_96": len(train_dataset3),
+            "test_32": len(test_dataset1),
+            "test_64": len(test_dataset2),
+            "test_96": len(test_dataset3),
+            "eval_128": len(test_dataset4),
+        },
+        "model": {
+            "kc": args.kc,
+            "input_channels": args.inch,
+            "total_parameters": num_params,
+            "trainable_parameters": trainable_params,
+            "continued_from_checkpoint": args.model,
+        },
+        "runtime": {
+            "device": str(device),
+            "gpu_name": torch.cuda.get_device_name(device) if device.type == "cuda" else None,
+            "pytorch_version": torch.__version__,
+            "slurm": _slurm_environment(),
+        },
+        "dataset_paths": {
+            "32": data_path1,
+            "64": data_path2,
+            "96": data_path3,
+            "128_eval": data_path4,
+        },
+    }
+    with open(os.path.join(ex_path, "run_config.json"), "w", encoding="utf-8") as f:
+        json.dump(run_config, f, indent=4)
+    print(f"Full reproducibility configuration saved to {os.path.join(ex_path, 'run_config.json')}", flush=True)
+    print(f"Per-epoch timing/loss log saved to {os.path.join(ex_path, 'training.log')}", flush=True)
+    print(f"Memory snapshots saved to {os.path.join(ex_path, 'memory_usage.jsonl')}", flush=True)
 
     loss_train_list = []
     loss_test_list1 = []
@@ -477,83 +737,93 @@ if __name__ == '__main__':
     epoch_list = []
     best_loss = float('inf')
     best_epoch = -1
-
+    epoch_durations = []
     start_time = time.time()
 
-    for epoch in range(args.epochs): 
-        #train
-        loss_train = train(epoch, model, optim,  train_dataloader1, train_dataloader2, train_dataloader3)
+    for epoch in range(args.epochs):
+        epoch_start = time.time()
+
+        loss_train = train(epoch, model, optim, train_dataloader1, train_dataloader2, train_dataloader3)
+        loss_test1, loss_test2, loss_test3, loss_test4, avg = eval(
+            epoch, model, test_dataloader1, test_dataloader2, test_dataloader3, test_dataloader4
+        )
 
         loss_train_list.append(loss_train)
-        logging.info('epoch: {} loss: {:.2f}'.format(epoch, loss_train))
-    
-        #evaluate
-        loss_test1, loss_test2, loss_test3, loss_test4, avg = eval(epoch, model, test_dataloader1, test_dataloader2, test_dataloader3, test_dataloader4)
-        logging.info('Evaluate loss32: {:.1f} loss64: {:.1f} loss96: {:.1f} / loss128: {:.1f} avg: {:.1f}'
-                    .format(loss_test1, loss_test2, loss_test3, loss_test4, avg))
-        
         epoch_list.append(epoch)
         loss_test_list1.append(loss_test1)
         loss_test_list2.append(loss_test2)
         loss_test_list3.append(loss_test3)
         loss_test_list4.append(loss_test4)
 
-        if epoch % 100 ==0:
-            print_memory(msg=f"Memory used after training epoch number: {epoch}")
-
-        #model save path
+        # The original checkpoint criterion: average validation loss over 32/64/96.
+        loss_test = (loss_test1 + loss_test2 + loss_test3) / 3
         model_path = os.path.join(ex_path, "ckpt")
         os.makedirs(model_path, exist_ok=True)
-
-        #save best model checkpoint
-        loss_test = (loss_test1+loss_test2+loss_test3)/3
-        if loss_test < best_loss:
-            print('loss_test: {:.1f} < best_loss: {:.1f} \n'.format(loss_test, best_loss))
+        new_best = loss_test < best_loss
+        if new_best:
+            previous_best = best_loss
             best_loss = loss_test
             best_epoch = epoch
-            best_model_state_dict = model.state_dict()
-            torch.save(best_model_state_dict, f"{model_path}/best_model_{best_loss:.1f}.pt")
+            best_model_path = os.path.join(model_path, f"best_model_{best_loss:.1f}.pt")
+            torch.save(model.state_dict(), best_model_path)
+            print(
+                f"NEW BEST MODEL | epoch {epoch} | validation={best_loss:.1f} "
+                f"< previous={previous_best:.1f} | saved: {best_model_path}",
+                flush=True,
+            )
 
-        # draw loss_train and loss_test
+        epoch_time = time.time() - epoch_start
+        epoch_durations.append(epoch_time)
+        elapsed = time.time() - start_time
+        recent_avg_epoch = sum(epoch_durations[-5:]) / len(epoch_durations[-5:])
+        remaining_epochs = args.epochs - epoch - 1
+        eta_seconds = recent_avg_epoch * remaining_epochs
+        projected_finish = datetime.fromtimestamp(time.time() + eta_seconds).strftime("%Y-%m-%d %H:%M:%S")
+
+        # Exactly one logger call per completed epoch -> one line per epoch in stderr.
+        epoch_logger.info(
+            f"epoch={epoch} ({epoch + 1}/{args.epochs}) | {_loss_descriptor(args)} | "
+            f"train={loss_train:.2f} | val32={loss_test1:.1f} val64={loss_test2:.1f} "
+            f"val96={loss_test3:.1f} val128={loss_test4:.1f} | "
+            f"checkpoint_metric={loss_test:.1f} best={best_loss:.1f}@epoch{best_epoch} "
+            f"new_best={'yes' if new_best else 'no'} | epoch_time={_format_duration(epoch_time)} | "
+            f"elapsed={_format_duration(elapsed)} | ETA={_format_duration(eta_seconds)} | "
+            f"projected_finish={projected_finish}"
+        )
+
+        _write_memory_record(ex_path, "epoch_complete", epoch=epoch)
+
         plt.clf()
-        plt.plot(epoch_list, loss_train_list, 'r-',  alpha=1, label='train_32_64_96')
-        plt.plot(epoch_list, loss_test_list1, 'c-',  alpha=1, label='test_32')
-        plt.plot(epoch_list, loss_test_list2, 'g-',  alpha=1, label='test_64')
-        plt.plot(epoch_list, loss_test_list3, 'b-',  alpha=1, label='test_96')
-        plt.plot(epoch_list, loss_test_list4, 'm-',  alpha=1, label='test_128')
+        plt.plot(epoch_list, loss_train_list, 'r-', alpha=1, label='train_32_64_96')
+        plt.plot(epoch_list, loss_test_list1, 'c-', alpha=1, label='test_32')
+        plt.plot(epoch_list, loss_test_list2, 'g-', alpha=1, label='test_64')
+        plt.plot(epoch_list, loss_test_list3, 'b-', alpha=1, label='test_96')
+        plt.plot(epoch_list, loss_test_list4, 'm-', alpha=1, label='test_128')
         plt.legend()
         plt.xlabel('epoch')
         plt.ylabel('loss-log')
-        plt.yscale('log')  # set y-axis scale to logarithmic
-        plt.savefig(os.path.join(ex_path, 'loss_ex{}.png'.format(args.ex)))
+        plt.yscale('log')
+        plt.savefig(os.path.join(ex_path, f'loss_ex{args.ex}.png'))
 
     elapsed = time.time() - start_time
+    experiment_info = {
+        **run_config,
+        "result": {
+            "best_epoch": best_epoch,
+            "best_validation_loss_32_64_96_average": best_loss,
+            "training_time_seconds": elapsed,
+            "training_time_human": _format_duration(elapsed),
+            "observed_memory_peak": dict(_observed_memory_peak),
+        },
+    }
+    with open(os.path.join(ex_path, "experiment.json"), "w", encoding="utf-8") as f:
+        json.dump(experiment_info, f, indent=4)
 
-    experiment_info = {"alpha": args.alpha,
-                       "learning_rate": args.lr,
-                       "batch_size_32": bsz1,
-                       "batch_size_64": bsz2,
-                       "batch_size_96": bsz3,
-                       "epochs": args.epochs,
-                       "kernel_channels": args.kc,
-                       "input_channels": args.inch,
-                       "optimizer": "Adam",
-                       "betas": [0.9, 0.999],
-                       "weight_decay": 1e-4,
-                       "data_augmentation": args.dataug,
-                       "seed": 0,
-                       "best_epoch": best_epoch,
-                       "best_validation_loss": best_loss,
-                       "training_time_seconds": elapsed}
-
-    with open(os.path.join(ex_path, "experiment.json"), "w") as f:
-        json.dump(experiment_info, f, indent=4)  
-
-    print_memory("Memory usage after training: ")
-
-    logging.info(f"Best epoch: {best_epoch}")
-    logging.info(f"Best validation loss: {best_loss}")
-    logging.info(f"Training time: {elapsed:.2f} seconds")
-    logging.info(f"Training time: {elapsed/60:.2f} minutes")
-    logging.info(json.dumps(experiment_info, indent=4))  
+    print_memory("Memory after training")
+    _write_memory_record(ex_path, "training_complete")
+    print(
+        f"TRAINING COMPLETE | best epoch={best_epoch} | best validation={best_loss:.1f} | "
+        f"elapsed={_format_duration(elapsed)}",
+        flush=True,
+    )
 

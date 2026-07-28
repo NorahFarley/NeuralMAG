@@ -156,10 +156,66 @@ def magnetic_divergence(spin_batch):
     return charge
 
 
-def print_memory(msg=""):
+def get_memory_stats():
+    """
+    Return current process RAM, DataLoader-worker RAM, and CUDA memory.
+
+    The old print_memory() reported only the parent Python process RSS, which can
+    badly under-report a Slurm job that has many DataLoader worker processes.
+    """
     process = psutil.Process(os.getpid())
-    mem = process.memory_info().rss / (1024**3)
-    print(f"{msg} | RAM: {mem:.2f} GB", flush=True)
+    main_rss = process.memory_info().rss
+
+    workers_rss = 0
+    worker_count = 0
+    for child in process.children(recursive=True):
+        try:
+            workers_rss += child.memory_info().rss
+            worker_count += 1
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+    stats = {
+        "ram_main_gb": main_rss / (1024**3),
+        "ram_workers_gb": workers_rss / (1024**3),
+        "ram_total_with_workers_gb": (main_rss + workers_rss) / (1024**3),
+        "worker_processes": worker_count,
+    }
+    if torch.cuda.is_available():
+        stats.update({
+            "gpu_allocated_gb": torch.cuda.memory_allocated() / (1024**3),
+            "gpu_reserved_gb": torch.cuda.memory_reserved() / (1024**3),
+            "gpu_max_allocated_gb": torch.cuda.max_memory_allocated() / (1024**3),
+            "gpu_max_reserved_gb": torch.cuda.max_memory_reserved() / (1024**3),
+        })
+    else:
+        stats.update({
+            "gpu_allocated_gb": 0.0,
+            "gpu_reserved_gb": 0.0,
+            "gpu_max_allocated_gb": 0.0,
+            "gpu_max_reserved_gb": 0.0,
+        })
+
+    return stats
+
+
+def print_memory(msg=""):
+    stats = get_memory_stats()
+    text = (
+        f"{msg} | RAM main: {stats['ram_main_gb']:.2f} GB | "
+        f"RAM workers: {stats['ram_workers_gb']:.2f} GB "
+        f"({stats['worker_processes']} workers) | "
+        f"RAM total observed: {stats['ram_total_with_workers_gb']:.2f} GB"
+    )
+    if torch.cuda.is_available():
+        text += (
+            f" | GPU allocated/reserved: "
+            f"{stats['gpu_allocated_gb']:.2f}/{stats['gpu_reserved_gb']:.2f} GB | "
+            f"GPU peak allocated/reserved: "
+            f"{stats['gpu_max_allocated_gb']:.2f}/{stats['gpu_max_reserved_gb']:.2f} GB"
+        )
+    print(text, flush=True)
+    return stats
 
 
 def tensor_rotate(tensor, symtype=None):
