@@ -46,6 +46,7 @@ from plots import (
     plot_torque_summary,
     plot_training_winding_density_vs_hext,
     plot_training_gradient_tensor_rate_vs_hext,
+    plot_training_weight_error_overlays,
 )
 
 
@@ -530,6 +531,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hext_end", type=float, default=-1000.0)
     parser.add_argument("--hext_steps", type=int, default=201)
     parser.add_argument("--field_angle_radians", type=float, default=0.01)
+    parser.add_argument("--weight_alpha", type=float, default=0.5, help="alpha used in diagnostic training weights w = 1 + alpha*R")
 
     parser.add_argument("--unet_stagnation_start", type=int, default=20000)
     parser.add_argument("--unet_stagnation_long_window", type=int, default=2000)
@@ -641,6 +643,7 @@ def main() -> None:
         "gradient_tensor_loop_abs_change_mean",
         "gradient_tensor_loop_abs_change_per_oe",
         "gradient_tensor_training_rate_mean",
+        "exchange_torque_training_rate_mean",
         "exchange_proxy_loop_abs_change_mean",
         "exchange_proxy_loop_abs_change_per_oe",
         "exchange_energy_density_loop_abs_change_mean",
@@ -766,11 +769,23 @@ def main() -> None:
             current_spin=film_fft.Spin,
             previous_spin=previous_fft_tensor,
             delta_hext_oe=delta_hext_oe if nloop > 0 else None,
+            # Exact constants used by training utils.exchange_torque_rate().
+            # Do NOT substitute the evaluation geometry's Ax here: the trained
+            # loss called exchange_torque_rate(x, x_prev) with its defaults.
+            Ms=1000.0,
+            Ax=0.5e-6,
+            cell_nm=(3.0, 3.0, 3.0),
         )
         unet_loop_change = compute_exact_loop_change_metrics(
             current_spin=film_unet.Spin,
             previous_spin=previous_unet_tensor,
             delta_hext_oe=delta_hext_oe if nloop > 0 else None,
+            # Exact constants used by training utils.exchange_torque_rate().
+            # Do NOT substitute the evaluation geometry's Ax here: the trained
+            # loss called exchange_torque_rate(x, x_prev) with its defaults.
+            Ms=1000.0,
+            Ax=0.5e-6,
+            cell_nm=(3.0, 3.0, 3.0),
         )
 
         current_fft_exchange_density_map = _exchange_energy_density_map(film_fft)
@@ -1024,6 +1039,18 @@ def main() -> None:
         physics_df[key] = np.asarray(values, dtype=float)
 
     physics_df["delta_hext_oe"] = np.asarray(delta_hext_history, dtype=float)
+
+    # Mentor-requested exact training-rate diagnostics on the FFT reference path.
+    r_grad = np.asarray(loop_change_fft["gradient_tensor_training_rate_mean"], dtype=float)
+    r_torque = np.asarray(loop_change_fft["exchange_torque_training_rate_mean"], dtype=float)
+    w_grad = 1.0 + args.weight_alpha * r_grad
+    w_torque = 1.0 + args.weight_alpha * r_torque
+    physics_df["R_grad"] = r_grad
+    physics_df["R_torque"] = r_torque
+    physics_df["w_grad"] = w_grad
+    physics_df["w_torque"] = w_torque
+    physics_df["weight_alpha"] = float(args.weight_alpha)
+
     physics_df.to_csv(output_dir / "physics_snapshots.csv", index=False)
 
     np.save(output_dir / "Hext_array.npy", np.asarray(x_plot))
@@ -1044,6 +1071,17 @@ def main() -> None:
             np.save(output_dir / f"{prefix}_{key}.npy", array)
     exact_loop_payload["delta_hext_oe"] = np.asarray(delta_hext_history, dtype=float)
     np.savez(output_dir / "exact_loop_change_metrics.npz", **exact_loop_payload)
+
+    np.savez(
+        output_dir / "mentor_weight_diagnostics.npz",
+        hext_scalar=np.asarray(x_plot, dtype=float),
+        R_grad=r_grad,
+        R_torque=r_torque,
+        w_grad=w_grad,
+        w_torque=w_torque,
+        trajectory_mae=np.asarray(spin_error_mae, dtype=float),
+        alpha=np.asarray(float(args.weight_alpha)),
+    )
 
     np.savez(
         output_dir / "demag_torque_error_tracking.npz",
@@ -1153,6 +1191,14 @@ def main() -> None:
         loop_change_fft,
         loop_change_unet,
     )
+    plot_training_weight_error_overlays(
+        general_title_summary,
+        str(summary_dir),
+        hext_range,
+        loop_change_fft,
+        spin_error_mae,
+        alpha=args.weight_alpha,
+    )
     plot_physics_vector_rate_summary(
         general_title_summary,
         str(summary_dir),
@@ -1190,5 +1236,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 

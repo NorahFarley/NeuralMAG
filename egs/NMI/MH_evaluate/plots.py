@@ -352,6 +352,112 @@ def _training_gradient_tensor_rate_map(
     return torch.sqrt(torch.sum(delta_grad.square(), dim=(3, 4, 5)))
 
 
+
+def _training_shift_nonperiodic(values, shift, dim):
+    """Exact boundary handling used by training utils._shift_nonperiodic()."""
+    shifted = torch.roll(values, shifts=shift, dims=dim)
+    index = [slice(None)] * values.ndim
+
+    if shift == 1:
+        index[dim] = 0
+        shifted[tuple(index)] = values[tuple(index)]
+    elif shift == -1:
+        index[dim] = -1
+        shifted[tuple(index)] = values[tuple(index)]
+    else:
+        raise ValueError("Only nearest-neighbor shifts +/-1 are supported.")
+
+    return shifted
+
+
+def _training_exchange_field_from_mag2305(
+    spin,
+    Ms=1000.0,
+    Ax=0.5e-6,
+    cell_nm=(3.0, 3.0, 3.0),
+):
+    """Exact equivalent of training utils.exchange_field() for MAG2305 spin.
+
+    MAG2305 layout is (Nx, Ny, layers, 3); training internally uses
+    (B, Nx, Ny, layers, 3). The coefficient and finite-boundary treatment
+    match utils.exchange_field() exactly.
+    """
+    if Ms <= 0:
+        raise ValueError("Ms must be positive.")
+    if Ax < 0:
+        raise ValueError("Ax must be nonnegative.")
+    if len(cell_nm) != 3 or any(float(d) <= 0 for d in cell_nm):
+        raise ValueError("cell_nm must contain three positive cell sizes.")
+
+    m = spin if isinstance(spin, torch.Tensor) else torch.as_tensor(spin)
+    if m.ndim != 4 or m.shape[-1] != 3:
+        raise ValueError(
+            "Expected MAG2305 spin shape (Nx, Ny, layers, 3); "
+            f"received {tuple(m.shape)}."
+        )
+    m = m.unsqueeze(0)
+
+    coeff_x = 2.0e14 * float(Ax) / (float(Ms) * float(cell_nm[0]) ** 2)
+    coeff_y = 2.0e14 * float(Ax) / (float(Ms) * float(cell_nm[1]) ** 2)
+    coeff_z = 2.0e14 * float(Ax) / (float(Ms) * float(cell_nm[2]) ** 2)
+
+    hx = coeff_x * (
+        (_training_shift_nonperiodic(m, 1, 1) - m)
+        + (_training_shift_nonperiodic(m, -1, 1) - m)
+    )
+    hy = coeff_y * (
+        (_training_shift_nonperiodic(m, 1, 2) - m)
+        + (_training_shift_nonperiodic(m, -1, 2) - m)
+    )
+    hz = coeff_z * (
+        (_training_shift_nonperiodic(m, 1, 3) - m)
+        + (_training_shift_nonperiodic(m, -1, 3) - m)
+    )
+    return hx + hy + hz
+
+
+def _training_exchange_torque_rate_map(
+    current_spin,
+    previous_spin,
+    dt=1.0,
+    Ms=1000.0,
+    Ax=0.5e-6,
+    cell_nm=(3.0, 3.0, 3.0),
+):
+    """Exact local map produced by training utils.exchange_torque_rate().
+
+    R_torque(x,y) = ||tau_ex(t)-tau_ex(t-1)||_(layers,xyz) / dt,
+    tau_ex = m x H_ex. The current training call leaves dt at its default 1.0.
+    """
+    if dt <= 0:
+        raise ValueError("dt must be positive.")
+
+    current = current_spin if isinstance(current_spin, torch.Tensor) else torch.as_tensor(current_spin)
+    previous = previous_spin if isinstance(previous_spin, torch.Tensor) else torch.as_tensor(previous_spin)
+    previous = previous.to(device=current.device, dtype=current.dtype)
+    if current.shape != previous.shape:
+        raise ValueError(
+            "Current and previous spins must have identical shapes; "
+            f"got {tuple(current.shape)} and {tuple(previous.shape)}."
+        )
+
+    current_grid = current.unsqueeze(0)
+    previous_grid = previous.unsqueeze(0)
+    h_now = _training_exchange_field_from_mag2305(
+        current, Ms=Ms, Ax=Ax, cell_nm=cell_nm
+    )
+    h_prev = _training_exchange_field_from_mag2305(
+        previous, Ms=Ms, Ax=Ax, cell_nm=cell_nm
+    )
+    tau_now = torch.linalg.cross(current_grid, h_now, dim=-1)
+    tau_prev = torch.linalg.cross(previous_grid, h_prev, dim=-1)
+    delta_tau = (tau_now - tau_prev) / dt
+
+    # Collapse both the magnetic-layer axis and vector-component axis,
+    # exactly matching training utils._collapse_vector_layers().
+    return torch.sqrt(torch.sum(delta_tau.square(), dim=(-1, -2)))
+
+
 @torch.no_grad()
 def compute_exact_loop_change_metrics(
     current_spin,
@@ -359,6 +465,9 @@ def compute_exact_loop_change_metrics(
     *,
     delta_hext_oe=None,
     active_threshold=1.0e-12,
+    Ms=1000.0,
+    Ax=0.5e-6,
+    cell_nm=(3.0, 3.0, 3.0),
 ):
     """Compute exact cellwise map changes before spatial averaging.
 
@@ -389,6 +498,11 @@ def compute_exact_loop_change_metrics(
         # x/y/z derivatives, and the training defaults dt=dx=dy=dz=1.
         "gradient_tensor_training_rate_mean": float("nan"),
 
+        # Spatial mean of the EXACT local map used by the current
+        # exchange_torque_rate training loss. This is R_torque before alpha
+        # is applied in w = 1 + alpha * R_torque.
+        "exchange_torque_training_rate_mean": float("nan"),
+
         "exchange_proxy_loop_abs_change_mean": float("nan"),
         "exchange_proxy_loop_abs_change_per_oe": float("nan"),
         "winding_map_loop_abs_change_mean": float("nan"),
@@ -410,6 +524,18 @@ def compute_exact_loop_change_metrics(
     )
     result["gradient_tensor_training_rate_mean"] = float(
         training_rate_map.mean().item()
+    )
+
+    exchange_torque_rate_map = _training_exchange_torque_rate_map(
+        current_spin,
+        previous_spin,
+        dt=1.0,
+        Ms=Ms,
+        Ax=Ax,
+        cell_nm=cell_nm,
+    )
+    result["exchange_torque_training_rate_mean"] = float(
+        exchange_torque_rate_map.mean().item()
     )
 
     previous = _layer0_training_tensor(previous_spin).to(
@@ -799,6 +925,90 @@ def plot_training_gradient_tensor_rate_vs_hext(
     )
     plt.close(fig)
 
+
+
+
+def plot_training_weight_error_overlays(
+    general_title_summary,
+    save_path_summary,
+    hext_range,
+    loop_fft,
+    trajectory_mae,
+    alpha=0.5,
+):
+    """Create the two mentor-requested weight/error plots.
+
+    The rate signals are evaluated on the FFT/LLG reference trajectory because
+    the training weight is a function of the magnetization input, not of the
+    UNet prediction. Each curve is the spatial mean of the exact local training
+    multiplier w(x,y) = 1 + alpha * R(x,y). The trajectory error on the second
+    y-axis is the FFT-vs-UNet spin MAE already recorded by this evaluator.
+    """
+    folder = _output_folder(save_path_summary)
+    hext = np.asarray(hext_range, dtype=float)
+    trajectory = np.asarray(trajectory_mae, dtype=float)
+
+    specs = (
+        (
+            "gradient_tensor_training_rate_mean",
+            r"$R_{grad}$",
+            r"$w_{grad}=1+\alpha R_{grad}$",
+            "R_grad_weight_vs_hext_with_trajectory_error.png",
+        ),
+        (
+            "exchange_torque_training_rate_mean",
+            r"$R_{torque}$",
+            r"$w_{torque}=1+\alpha R_{torque}$",
+            "R_torque_weight_vs_hext_with_trajectory_error.png",
+        ),
+    )
+
+    for rate_key, rate_label, weight_label, filename in specs:
+        rate = np.asarray(loop_fft[rate_key], dtype=float)
+        weight = 1.0 + float(alpha) * rate
+
+        fig, ax_weight = plt.subplots(figsize=(8.5, 6.2))
+        ax_error = ax_weight.twinx()
+
+        ax_weight.plot(
+            hext,
+            weight,
+            linewidth=2.5,
+            label=weight_label + rf" ($\alpha={float(alpha):g}$)",
+        )
+        ax_error.plot(
+            hext,
+            trajectory,
+            linewidth=2.1,
+            linestyle="--",
+            color="black",
+            label="Magnetization trajectory error",
+        )
+
+        ax_weight.set_title(
+            rate_label + " Training Weight vs. External Field\n" + general_title_summary,
+            fontsize=11,
+            fontweight="bold",
+        )
+        ax_weight.set_xlabel(r"External Field $H_{ext}$ [Oe]")
+        ax_weight.set_ylabel("Spatial mean training weight")
+        ax_error.set_ylabel("Magnetization trajectory MAE")
+        _set_ascending_hext_axis(ax_weight, hext)
+        ax_weight.grid(True, linestyle="--", alpha=0.35)
+
+        finite_error = trajectory[np.isfinite(trajectory)]
+        if finite_error.size:
+            error_max = float(np.max(finite_error))
+            ax_error.set_ylim(0.0, 1.05 * error_max if error_max > 0.0 else 1.0)
+
+        _combined_legend(ax_weight, ax_error)
+        fig.tight_layout()
+        fig.savefig(
+            os.path.join(folder, filename),
+            dpi=300,
+            bbox_inches="tight",
+        )
+        plt.close(fig)
 
 
 def plot_physics_vector_rate_summary(
@@ -1382,5 +1592,6 @@ def plot_loop_change_error_overlays(
             bbox_inches="tight",
         )
         plt.close(fig)
+
 
 
