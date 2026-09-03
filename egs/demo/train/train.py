@@ -16,6 +16,9 @@ from Unet import UNet
 from data_load import (dataset_prepare, dataset_prepare_temporal_physics,)
 from utils import * 
 
+COMBINED_RATE_LOSS = "exchange_torque_gradient_tensor_rate"
+
+
 RATE_LOSS_TYPES = {
     "gradient_mag_rate",
     "gradient_tensor_rate",
@@ -24,17 +27,24 @@ RATE_LOSS_TYPES = {
     "exchange_energy_density_rate",
     "demag_torque_rate",
     "demag_field_rate",
-    "winding_density_rate"}
+    "winding_density_rate",
+    COMBINED_RATE_LOSS,
+}
 
 
 def _uses_alpha(loss_type):
-    return loss_type not in ("baseline", "torque_mismatch")
+    return loss_type not in ("baseline", "torque_mismatch", COMBINED_RATE_LOSS)
 
 
 def _loss_parameter_tag(args):
     """Tag only the coefficient that actually participates in this loss."""
     if args.loss_type == "torque_mismatch":
         return f"torque_lambda{args.torque_lambda:g}"
+    if args.loss_type == COMBINED_RATE_LOSS:
+        return (
+            f"alpha_torque{args.alpha_torque:g}_"
+            f"alpha_grad{args.alpha_grad:g}"
+        )
     if _uses_alpha(args.loss_type):
         return f"alpha{args.alpha:g}"
     return ""
@@ -43,6 +53,11 @@ def _loss_parameter_tag(args):
 def _loss_descriptor(args):
     if args.loss_type == "torque_mismatch":
         return f"loss={args.loss_type} torque_lambda={args.torque_lambda:g}"
+    if args.loss_type == COMBINED_RATE_LOSS:
+        return (
+            f"loss={args.loss_type} alpha_torque={args.alpha_torque:g} "
+            f"alpha_grad={args.alpha_grad:g}"
+        )
     if _uses_alpha(args.loss_type):
         return f"loss={args.loss_type} alpha={args.alpha:g}"
     return f"loss={args.loss_type}"
@@ -148,6 +163,9 @@ def _print_active_loss_settings(args):
     print(f"  loss type: {args.loss_type}", flush=True)
     if args.loss_type == "torque_mismatch":
         print(f"  torque lambda: {args.torque_lambda:g}", flush=True)
+    elif args.loss_type == COMBINED_RATE_LOSS:
+        print(f"  exchange-torque-rate alpha: {args.alpha_torque:g}", flush=True)
+        print(f"  gradient-tensor-rate alpha: {args.alpha_grad:g}", flush=True)
     elif _uses_alpha(args.loss_type):
         print(f"  alpha: {args.alpha:g}", flush=True)
     print(f"  learning rate: {args.lr:g}", flush=True)
@@ -284,10 +302,86 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
             wd2 = winding_density_rate(x2, x2_prev)
             wd3 = winding_density_rate(x3, x3_prev)
 
+        elif args.loss_type == COMBINED_RATE_LOSS:
+            torque_rate1 = exchange_torque_rate(x1, x1_prev)
+            torque_rate2 = exchange_torque_rate(x2, x2_prev)
+            torque_rate3 = exchange_torque_rate(x3, x3_prev)
+
+            grad_rate1 = gradient_tensor_rate(x1, x1_prev)
+            grad_rate2 = gradient_tensor_rate(x2, x2_prev)
+            grad_rate3 = gradient_tensor_rate(x3, x3_prev)
+
         else:
             raise ValueError(f"Unknown loss_type: {args.loss_type}")
 
-        if args.loss_type not in ("baseline", "torque_mismatch"):
+        if args.loss_type == COMBINED_RATE_LOSS:
+            torque_rate1 = torch.abs(torque_rate1).unsqueeze(1)
+            torque_rate2 = torch.abs(torque_rate2).unsqueeze(1)
+            torque_rate3 = torch.abs(torque_rate3).unsqueeze(1)
+
+            grad_rate1 = torch.abs(grad_rate1).unsqueeze(1)
+            grad_rate2 = torch.abs(grad_rate2).unsqueeze(1)
+            grad_rate3 = torch.abs(grad_rate3).unsqueeze(1)
+
+            weight1 = (
+                1
+                + args.alpha_torque * torque_rate1
+                + args.alpha_grad * grad_rate1
+            )
+            weight2 = (
+                1
+                + args.alpha_torque * torque_rate2
+                + args.alpha_grad * grad_rate2
+            )
+            weight3 = (
+                1
+                + args.alpha_torque * torque_rate3
+                + args.alpha_grad * grad_rate3
+            )
+
+            if epoch == 0 and batch_idx == 0:
+                def tensor_stats(tensor):
+                    return {
+                        "min": tensor.min().item(),
+                        "max": tensor.max().item(),
+                        "mean": tensor.mean().item(),
+                        "std": tensor.std().item(),
+                        "p99": torch.quantile(tensor.flatten(), 0.99).item(),
+                    }
+
+                combined_stats = {
+                    "formula": (
+                        "1 + alpha_torque * abs(exchange_torque_rate) "
+                        "+ alpha_grad * abs(gradient_tensor_rate)"
+                    ),
+                    "alpha_torque": args.alpha_torque,
+                    "alpha_grad": args.alpha_grad,
+                }
+
+                for size, torque_rate, grad_rate, weight in (
+                    ("32", torque_rate1, grad_rate1, weight1),
+                    ("64", torque_rate2, grad_rate2, weight2),
+                    ("96", torque_rate3, grad_rate3, weight3),
+                ):
+                    combined_stats[size] = {
+                        "exchange_torque_rate": tensor_stats(torque_rate),
+                        "gradient_tensor_rate": tensor_stats(grad_rate),
+                        "weighted_exchange_torque_contribution": tensor_stats(
+                            args.alpha_torque * torque_rate
+                        ),
+                        "weighted_gradient_tensor_contribution": tensor_stats(
+                            args.alpha_grad * grad_rate
+                        ),
+                        "combined_weight": tensor_stats(weight),
+                    }
+
+                file_path = os.path.join(
+                    ex_path, f"{args.loss_type}_stats.json"
+                )
+                with open(file_path, "w", encoding="utf-8") as f:
+                    json.dump(combined_stats, f, indent=4)
+
+        elif args.loss_type not in ("baseline", "torque_mismatch"):
             wd1 = wd1.unsqueeze(1)
             wd2 = wd2.unsqueeze(1)
             wd3 = wd3.unsqueeze(1)
@@ -494,6 +588,8 @@ if __name__ == '__main__':
     parser.add_argument('--ex', type=float, default=1.0, help='experiment identifier (default: 1.0)')
     parser.add_argument('--dataug', action=argparse.BooleanOptionalAction, default=True, help='enable physical symmetry augmentation')
     parser.add_argument('--alpha', type=float, default=0.5, help='weighting coefficient for alpha-weighted losses')
+    parser.add_argument('--alpha-torque', type=float, default=0.5, help='exchange-torque-rate coefficient in the combined loss (default: 0.5)')
+    parser.add_argument('--alpha-grad', type=float, default=0.5, help='gradient-tensor-rate coefficient in the combined loss (default: 0.5)')
     parser.add_argument('--loss_type', type=str, default='baseline', help='loss weighting method')
     parser.add_argument('--torque-lambda', type=float, default=0.1, help='coefficient for torque-mismatch auxiliary loss')
     parser.add_argument('--model', type=str, default=None, help='existing model to continue training')
@@ -544,6 +640,11 @@ if __name__ == '__main__':
     active_coefficient = None
     if args.loss_type == "torque_mismatch":
         active_coefficient = {"name": "torque_lambda", "value": args.torque_lambda}
+    elif args.loss_type == COMBINED_RATE_LOSS:
+        active_coefficient = {
+            "alpha_torque": args.alpha_torque,
+            "alpha_grad": args.alpha_grad,
+        }
     elif _uses_alpha(args.loss_type):
         active_coefficient = {"name": "alpha", "value": args.alpha}
     launch_parameters = {
@@ -664,6 +765,15 @@ if __name__ == '__main__':
         "loss_type": args.loss_type,
         "uses_alpha": _uses_alpha(args.loss_type),
         "alpha": args.alpha if _uses_alpha(args.loss_type) else None,
+        "uses_combined_rate_alphas": args.loss_type == COMBINED_RATE_LOSS,
+        "alpha_torque": args.alpha_torque if args.loss_type == COMBINED_RATE_LOSS else None,
+        "alpha_grad": args.alpha_grad if args.loss_type == COMBINED_RATE_LOSS else None,
+        "combined_weight_formula": (
+            "1 + alpha_torque * abs(exchange_torque_rate) "
+            "+ alpha_grad * abs(gradient_tensor_rate)"
+            if args.loss_type == COMBINED_RATE_LOSS
+            else None
+        ),
         "uses_torque_lambda": args.loss_type == "torque_mismatch",
         "torque_lambda": args.torque_lambda if args.loss_type == "torque_mismatch" else None,
     }
