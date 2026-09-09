@@ -17,6 +17,7 @@ from data_load import (dataset_prepare, dataset_prepare_temporal_physics,)
 from utils import * 
 
 COMBINED_RATE_LOSS = "exchange_torque_gradient_tensor_rate"
+RATE_ERROR_LOSS = "demag_field_rate_error"
 
 
 RATE_LOSS_TYPES = {
@@ -29,11 +30,17 @@ RATE_LOSS_TYPES = {
     "demag_field_rate",
     "winding_density_rate",
     COMBINED_RATE_LOSS,
+    RATE_ERROR_LOSS,
 }
 
 
 def _uses_alpha(loss_type):
-    return loss_type not in ("baseline", "torque_mismatch", COMBINED_RATE_LOSS)
+    return loss_type not in (
+        "baseline",
+        "torque_mismatch",
+        COMBINED_RATE_LOSS,
+        RATE_ERROR_LOSS,
+    )
 
 
 def _loss_parameter_tag(args):
@@ -45,6 +52,8 @@ def _loss_parameter_tag(args):
             f"alpha_torque{args.alpha_torque:g}_"
             f"alpha_grad{args.alpha_grad:g}"
         )
+    if args.loss_type == RATE_ERROR_LOSS:
+        return f"rate_error_lambda{args.rate_error_lambda:g}"
     if _uses_alpha(args.loss_type):
         return f"alpha{args.alpha:g}"
     return ""
@@ -57,6 +66,11 @@ def _loss_descriptor(args):
         return (
             f"loss={args.loss_type} alpha_torque={args.alpha_torque:g} "
             f"alpha_grad={args.alpha_grad:g}"
+        )
+    if args.loss_type == RATE_ERROR_LOSS:
+        return (
+            f"loss={args.loss_type} "
+            f"rate_error_lambda={args.rate_error_lambda:g}"
         )
     if _uses_alpha(args.loss_type):
         return f"loss={args.loss_type} alpha={args.alpha:g}"
@@ -166,6 +180,8 @@ def _print_active_loss_settings(args):
     elif args.loss_type == COMBINED_RATE_LOSS:
         print(f"  exchange-torque-rate alpha: {args.alpha_torque:g}", flush=True)
         print(f"  gradient-tensor-rate alpha: {args.alpha_grad:g}", flush=True)
+    elif args.loss_type == RATE_ERROR_LOSS:
+        print(f"  demag-field-rate-error lambda: {args.rate_error_lambda:g}", flush=True)
     elif _uses_alpha(args.loss_type):
         print(f"  alpha: {args.alpha:g}", flush=True)
     print(f"  learning rate: {args.lr:g}", flush=True)
@@ -181,6 +197,7 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
     Loss22 = AverageMeter()
     Loss31 = AverageMeter()
     Loss32 = AverageMeter()
+    RateErrorLoss = AverageMeter()
 
     total_batches = min(len(train_dataloader1), len(train_dataloader2), len(train_dataloader3))
     use_temporal_data = (args.loss_type in RATE_LOSS_TYPES)
@@ -236,7 +253,7 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
 
         alpha = args.alpha
 
-        if args.loss_type in ("baseline", "torque_mismatch"):
+        if args.loss_type in ("baseline", "torque_mismatch", RATE_ERROR_LOSS):
             weight1 = 1
             weight2 = 1
             weight3 = 1   
@@ -381,7 +398,7 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
                 with open(file_path, "w", encoding="utf-8") as f:
                     json.dump(combined_stats, f, indent=4)
 
-        elif args.loss_type not in ("baseline", "torque_mismatch"):
+        elif args.loss_type not in ("baseline", "torque_mismatch", RATE_ERROR_LOSS):
             wd1 = wd1.unsqueeze(1)
             wd2 = wd2.unsqueeze(1)
             wd3 = wd3.unsqueeze(1)
@@ -423,23 +440,126 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
 
        # weight1 = 1 + alpha * wd1 + beta * wd1_2 #winding/gradient
 
-        #data1 size32
-        pred_y1 = model(x1)
-        loss11 = mse( ISLA(pred_y1), y1 ) * mask1 * weight1 #enlarge-scale predict Hd to label Hd 
-        loss12 = mse( pred_y1, SLA(y1) ) * mask1  * weight1 #shrink-scale label Hd to predict Hd
-        loss1 = ((loss11 + 1000 * loss12)).mean()
+        if args.loss_type == RATE_ERROR_LOSS:
+            # Process one resolution at a time and backpropagate immediately.
+            # This gives the same summed gradient as one large backward pass,
+            # while avoiding retention of six U-Net activation graphs at once.
+            optim.zero_grad()
 
-        #data2 size64
-        pred_y2 = model(x2)
-        loss21 = mse(ISLA(pred_y2), y2) * mask2 * weight2
-        loss22 = mse(pred_y2, SLA(y2)) * mask2 * weight2
-        loss2 = ((loss21 + 1000 * loss22)).mean()
-        
-        #data3 size96
-        pred_y3 = model(x3)
-        loss31 = mse(ISLA(pred_y3), y3) * mask3 * weight3
-        loss32 = mse(pred_y3, SLA(y3)) * mask3 * weight3
-        loss3 = ((loss31 + 1000 * loss32)).mean()
+            def train_rate_error_resolution(x, y, x_prev, y_prev, mask):
+                pred_y = model(x)
+                pred_y_prev = model(x_prev)
+
+                # Standard NeuralMAG loss for the current state.
+                base_physical = mse(ISLA(pred_y), y) * mask
+                base_log = mse(pred_y, SLA(y)) * mask
+                base_loss = (base_physical + 1000 * base_log).mean()
+
+                # Error in the demagnetizing-field change per saved transition.
+                # A common physical dt would scale both differences equally and
+                # can therefore be absorbed into rate_error_lambda.
+                pred_delta_physical = ISLA(pred_y) - ISLA(pred_y_prev)
+                true_delta_physical = y - y_prev
+                pred_delta_log = pred_y - pred_y_prev
+                true_delta_log = SLA(y) - SLA(y_prev)
+
+                rate_physical = (
+                    mse(pred_delta_physical, true_delta_physical) * mask
+                )
+                rate_log = mse(pred_delta_log, true_delta_log) * mask
+                rate_loss = (rate_physical + 1000 * rate_log).mean()
+
+                total_loss = base_loss + args.rate_error_lambda * rate_loss
+                total_loss.backward()
+
+                return (
+                    pred_y.detach(),
+                    base_physical,
+                    base_log,
+                    base_loss,
+                    rate_physical,
+                    rate_log,
+                    rate_loss,
+                    total_loss,
+                )
+
+            (
+                pred_y1, loss11, loss12, loss1,
+                rate_physical1, rate_log1, rate_loss1, total_loss1,
+            ) = train_rate_error_resolution(x1, y1, x1_prev, y1_prev, mask1)
+            (
+                pred_y2, loss21, loss22, loss2,
+                rate_physical2, rate_log2, rate_loss2, total_loss2,
+            ) = train_rate_error_resolution(x2, y2, x2_prev, y2_prev, mask2)
+            (
+                pred_y3, loss31, loss32, loss3,
+                rate_physical3, rate_log3, rate_loss3, total_loss3,
+            ) = train_rate_error_resolution(x3, y3, x3_prev, y3_prev, mask3)
+
+            optim.step()
+            optim.zero_grad()
+
+            rate_loss_batch = (rate_loss1 + rate_loss2 + rate_loss3) / 3
+            RateErrorLoss.update(
+                rate_loss_batch.item(),
+                x1.size(0) + x2.size(0) + x3.size(0),
+            )
+
+            if epoch == 0 and batch_idx == 0:
+                rate_error_stats = {
+                    "formula": (
+                        "L_total = L_current + rate_error_lambda * "
+                        "L_delta_Hdemag"
+                    ),
+                    "rate_definition": "difference per saved transition",
+                    "rate_error_lambda": args.rate_error_lambda,
+                    "32": {
+                        "base_loss": loss1.item(),
+                        "rate_physical_mse": rate_physical1.mean().item(),
+                        "rate_log_mse": rate_log1.mean().item(),
+                        "rate_loss": rate_loss1.item(),
+                        "total_loss": total_loss1.item(),
+                    },
+                    "64": {
+                        "base_loss": loss2.item(),
+                        "rate_physical_mse": rate_physical2.mean().item(),
+                        "rate_log_mse": rate_log2.mean().item(),
+                        "rate_loss": rate_loss2.item(),
+                        "total_loss": total_loss2.item(),
+                    },
+                    "96": {
+                        "base_loss": loss3.item(),
+                        "rate_physical_mse": rate_physical3.mean().item(),
+                        "rate_log_mse": rate_log3.mean().item(),
+                        "rate_loss": rate_loss3.item(),
+                        "total_loss": total_loss3.item(),
+                    },
+                }
+                with open(
+                    os.path.join(ex_path, "demag_field_rate_error_stats.json"),
+                    "w",
+                    encoding="utf-8",
+                ) as f:
+                    json.dump(rate_error_stats, f, indent=4)
+
+        else:
+            #data1 size32
+            pred_y1 = model(x1)
+            loss11 = mse( ISLA(pred_y1), y1 ) * mask1 * weight1 #enlarge-scale predict Hd to label Hd 
+            loss12 = mse( pred_y1, SLA(y1) ) * mask1  * weight1 #shrink-scale label Hd to predict Hd
+            loss1 = ((loss11 + 1000 * loss12)).mean()
+
+            #data2 size64
+            pred_y2 = model(x2)
+            loss21 = mse(ISLA(pred_y2), y2) * mask2 * weight2
+            loss22 = mse(pred_y2, SLA(y2)) * mask2 * weight2
+            loss2 = ((loss21 + 1000 * loss22)).mean()
+            
+            #data3 size96
+            pred_y3 = model(x3)
+            loss31 = mse(ISLA(pred_y3), y3) * mask3 * weight3
+            loss32 = mse(pred_y3, SLA(y3)) * mask3 * weight3
+            loss3 = ((loss31 + 1000 * loss32)).mean()
 
         if args.loss_type == "torque_mismatch":
             torque_loss1 = demag_torque_mismatch_loss(x1, ISLA(pred_y1), y1)
@@ -462,11 +582,12 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
 
                 with open(os.path.join(ex_path, "torque_mismatch_stats.json"), "w", encoding="utf-8") as f: json.dump(torque_stats, f, indent=4)
 
-        loss = loss1 + loss2 + loss3
+        if args.loss_type != RATE_ERROR_LOSS:
+            loss = loss1 + loss2 + loss3
 
-        loss.backward()
-        optim.step()
-        optim.zero_grad()
+            loss.backward()
+            optim.step()
+            optim.zero_grad()
         
         Loss11.update( loss11.mean().item(),  x1.size(0) )
         Loss12.update( loss12.mean().item(),  x1.size(0) )
@@ -502,7 +623,10 @@ def train(epoch, model, optim, train_dataloader1, train_dataloader2, train_datal
         visualize('train', epoch, ex_path, x2, y2, ISLA(pred_y2), 64)
         visualize('train', epoch, ex_path, x3, y3, ISLA(pred_y3), 96)
 
-    return Loss.avg
+    rate_error_avg = (
+        RateErrorLoss.avg if args.loss_type == RATE_ERROR_LOSS else None
+    )
+    return Loss.avg, rate_error_avg
 
 
 def eval(epoch, model, dataloader1, dataloader2, dataloader3, dataloader4):
@@ -590,6 +714,7 @@ if __name__ == '__main__':
     parser.add_argument('--alpha', type=float, default=0.5, help='weighting coefficient for alpha-weighted losses')
     parser.add_argument('--alpha-torque', type=float, default=0.5, help='exchange-torque-rate coefficient in the combined loss (default: 0.5)')
     parser.add_argument('--alpha-grad', type=float, default=0.5, help='gradient-tensor-rate coefficient in the combined loss (default: 0.5)')
+    parser.add_argument('--rate-error-lambda', type=float, default=0.5, help='coefficient for the demagnetizing-field rate-error auxiliary loss (default: 0.5)')
     parser.add_argument('--loss_type', type=str, default='baseline', help='loss weighting method')
     parser.add_argument('--torque-lambda', type=float, default=0.1, help='coefficient for torque-mismatch auxiliary loss')
     parser.add_argument('--model', type=str, default=None, help='existing model to continue training')
@@ -644,6 +769,11 @@ if __name__ == '__main__':
         active_coefficient = {
             "alpha_torque": args.alpha_torque,
             "alpha_grad": args.alpha_grad,
+        }
+    elif args.loss_type == RATE_ERROR_LOSS:
+        active_coefficient = {
+            "name": "rate_error_lambda",
+            "value": args.rate_error_lambda,
         }
     elif _uses_alpha(args.loss_type):
         active_coefficient = {"name": "alpha", "value": args.alpha}
@@ -774,6 +904,15 @@ if __name__ == '__main__':
             if args.loss_type == COMBINED_RATE_LOSS
             else None
         ),
+        "uses_rate_error_lambda": args.loss_type == RATE_ERROR_LOSS,
+        "rate_error_lambda": (
+            args.rate_error_lambda if args.loss_type == RATE_ERROR_LOSS else None
+        ),
+        "rate_error_quantity": (
+            "demagnetizing-field difference per saved transition"
+            if args.loss_type == RATE_ERROR_LOSS
+            else None
+        ),
         "uses_torque_lambda": args.loss_type == "torque_mismatch",
         "torque_lambda": args.torque_lambda if args.loss_type == "torque_mismatch" else None,
     }
@@ -853,7 +992,14 @@ if __name__ == '__main__':
     for epoch in range(args.epochs):
         epoch_start = time.time()
 
-        loss_train = train(epoch, model, optim, train_dataloader1, train_dataloader2, train_dataloader3)
+        loss_train, train_rate_error = train(
+            epoch,
+            model,
+            optim,
+            train_dataloader1,
+            train_dataloader2,
+            train_dataloader3,
+        )
         loss_test1, loss_test2, loss_test3, loss_test4, avg = eval(
             epoch, model, test_dataloader1, test_dataloader2, test_dataloader3, test_dataloader4
         )
@@ -891,9 +1037,15 @@ if __name__ == '__main__':
         projected_finish = datetime.fromtimestamp(time.time() + eta_seconds).strftime("%Y-%m-%d %H:%M:%S")
 
         # Exactly one logger call per completed epoch -> one line per epoch in stderr.
+        rate_error_log = (
+            f" | train_rate_error={train_rate_error:.3f}"
+            if train_rate_error is not None
+            else ""
+        )
         epoch_logger.info(
             f"epoch={epoch} ({epoch + 1}/{args.epochs}) | {_loss_descriptor(args)} | "
-            f"train={loss_train:.2f} | val32={loss_test1:.1f} val64={loss_test2:.1f} "
+            f"train={loss_train:.2f}{rate_error_log} | "
+            f"val32={loss_test1:.1f} val64={loss_test2:.1f} "
             f"val96={loss_test3:.1f} val128={loss_test4:.1f} | "
             f"checkpoint_metric={loss_test:.1f} best={best_loss:.1f}@epoch{best_epoch} "
             f"new_best={'yes' if new_best else 'no'} | epoch_time={_format_duration(epoch_time)} | "
